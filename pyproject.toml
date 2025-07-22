@@ -1,9 +1,0 @@
-[project]
-name = "hugo"
-version = "0.1.0"
-description = "hugo is a multi-modal AI assistant"
-readme = "README.md"
-requires-python = ">=3.13"
-dependencies = [
-    "ruff>=0.12.4",
-]
