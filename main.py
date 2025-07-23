@@ -270,7 +270,7 @@ class VoiceChat:
             stream = self.audio.open(
                 format=FORMAT,
                 channels=CHANNELS,
-                rate=24000,  # Gemini output rate
+                rate=GEMINI_AUDIO_RATE,  # Gemini output rate
                 output=True
             )
             
