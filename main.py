@@ -28,24 +28,10 @@ warnings.filterwarnings("ignore", category=UserWarning)
 # Also suppress logging warnings
 logging.getLogger().setLevel(logging.ERROR)
 
-# Redirect stderr temporarily to catch other warnings
-import io
-original_stderr = sys.stderr
-
-class WarningFilter:
-    def __init__(self, original_stream):
-        self.original_stream = original_stream
-        
-    def write(self, text):
-        # Filter out the specific warning
-        if "non-text parts" not in text and "inline_data" not in text:
-            self.original_stream.write(text)
-            
-    def flush(self):
-        self.original_stream.flush()
-
-sys.stderr = WarningFilter(original_stderr)
-
+# Suppress specific warnings using the warnings module
+warnings.filterwarnings("ignore", message=".*non-text parts.*")
+warnings.filterwarnings("ignore", message=".*inline_data.*")
+warnings.filterwarnings("ignore", category=UserWarning)
 os.system('cls' if os.name == 'nt' else 'clear')
 
 # Audio settings
