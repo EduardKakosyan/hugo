@@ -151,7 +151,7 @@ class VoiceChat:
                     print(f"\r{bar} │ {elapsed:.1f}s", end="", flush=True)
                     
                     await asyncio.sleep(0.01)
-                except:
+                except (OSError, Exception):
                     break
         
         # Start recording
