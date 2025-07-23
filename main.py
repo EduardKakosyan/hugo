@@ -38,6 +38,7 @@ os.system('cls' if os.name == 'nt' else 'clear')
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 RATE = 16000
+GEMINI_AUDIO_RATE = 24000  # Gemini's audio output rate
 CHUNK = 1024
 
 # Load API key
@@ -320,7 +321,7 @@ class VoiceChat:
         try:
             print("🔌 Connecting to Gemini...")
             async with self.client.aio.live.connect(
-                model="models/gemini-2.0-flash-live-001",
+                model="models/gemini-2.5-flash-exp-native-audio-thinking-dialog",
                 config=self.config
             ) as session:
                 self.session = session
