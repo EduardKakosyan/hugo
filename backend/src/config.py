@@ -22,9 +22,9 @@ _yaml = _load_yaml_config()
 
 
 class RobotSettings(BaseSettings):
-    host: str = Field(default=_yaml.get("robot", {}).get("host", "localhost"))
-    port: int = Field(default=_yaml.get("robot", {}).get("port", 8000))
-    simulation: bool = Field(default=_yaml.get("robot", {}).get("simulation", True))
+    simulation: bool = Field(
+        default=_yaml.get("robot", {}).get("simulation", True)
+    )
     state_frequency_hz: int = Field(
         default=_yaml.get("robot", {}).get("state_frequency_hz", 20)
     )
