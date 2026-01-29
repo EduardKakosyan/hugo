@@ -1,0 +1,47 @@
+robot:
+  host: localhost
+  port: 8000
+  simulation: true
+  state_frequency_hz: 20
+
+agent:
+  default_provider: "gemini/gemini-2.5-flash"
+  providers:
+    gemini:
+      model: "gemini/gemini-2.5-flash"
+    openai:
+      model: "openai/gpt-4o"
+    anthropic:
+      model: "anthropic/claude-sonnet-4-20250514"
+    huggingface:
+      model: "huggingface/mistralai/Ministral-3-14B-Reasoning-2512"
+    ollama:
+      model: "ollama/llama3.1"
+  system_prompt: |
+    You are HUGO, a personal assistant embodied in a Reachy Mini robot.
+    You can see through your camera, speak, and help with tasks like
+    managing emails, calendar events, and notes.
+    Be concise, helpful, and friendly.
+
+voice:
+  engine: fallback  # "personaplex" or "fallback"
+  personaplex:
+    host: localhost
+    port: 8998
+  fallback:
+    stt_provider: openai  # OpenAI Whisper
+    tts_provider: openai   # OpenAI TTS
+
+vision:
+  enabled: true
+  stream_quality: 80  # JPEG quality (0-100)
+  analysis_provider: "gemini/gemini-2.5-flash"
+
+integrations:
+  outlook:
+    enabled: false
+  calendar:
+    enabled: false
+  obsidian:
+    enabled: false
+    host: "http://localhost:27124"

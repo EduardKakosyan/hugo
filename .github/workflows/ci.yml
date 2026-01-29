@@ -11,8 +11,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  validate:
-    name: Lint, Type Check, Test
+  frontend:
+    name: Frontend (Lint, Type Check, Test)
     runs-on: ubuntu-latest
 
     steps:
@@ -34,15 +34,58 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+        working-directory: frontend
 
       - name: Run ESLint
         run: pnpm lint
+        working-directory: frontend
 
       - name: Run Type Check
         run: pnpm type-check
+        working-directory: frontend
 
       - name: Run Tests
         run: pnpm test
+        working-directory: frontend
+
+  backend:
+    name: Backend (Ruff, Mypy, Pytest)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+        working-directory: backend
+
+      - name: Run Ruff
+        run: ruff check src/ tests/
+        working-directory: backend
+
+      - name: Run Mypy
+        run: mypy src/
+        working-directory: backend
+
+      - name: Run Pytest
+        run: pytest
+        working-directory: backend
+
+  secrets:
+    name: Secret Scanning
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Scan for secrets (GitHub)
         if: ${{ !env.ACT }}
@@ -54,17 +97,7 @@ jobs:
       - name: Scan for secrets (local/act)
         if: ${{ env.ACT }}
         run: |
-          echo "Running gitleaks locally (act environment detected)"
-          # Install gitleaks if not present
           if ! command -v gitleaks &> /dev/null; then
             curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz | tar -xz -C /usr/local/bin gitleaks
           fi
           gitleaks detect --source . --config .gitleaks.toml --verbose
-
-      - name: Upload coverage
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-report
-          path: coverage/
-          retention-days: 7

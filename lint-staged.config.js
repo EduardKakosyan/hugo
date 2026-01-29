@@ -1,10 +1,13 @@
 /** @type {import('lint-staged').Config} */
 const config = {
-  // TypeScript/JavaScript files - lint then format
-  "*.{js,jsx,ts,tsx}": ["eslint --fix", "prettier --write"],
+  // Frontend TypeScript/JavaScript/Svelte files
+  "frontend/**/*.{js,ts,svelte}": ["eslint --fix", "prettier --write"],
 
   // Styles
-  "*.{css,scss}": ["prettier --write"],
+  "frontend/**/*.css": ["prettier --write"],
+
+  // Python files
+  "backend/**/*.py": ["ruff check --fix"],
 
   // JSON, Markdown, etc.
   "*.{json,md,mdx,yml,yaml}": ["prettier --write"],
