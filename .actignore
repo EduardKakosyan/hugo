@@ -1,0 +1,29 @@
+# Files to exclude when act copies the workspace
+# Similar to .dockerignore
+
+# Dependencies (will be installed fresh in container)
+node_modules/
+.pnpm-store/
+
+# Git
+.git/
+
+# Build outputs
+.next/
+out/
+build/
+dist/
+coverage/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+
+# Local secrets (passed via --secret-file instead)
+.secrets
+
+# Logs
+*.log

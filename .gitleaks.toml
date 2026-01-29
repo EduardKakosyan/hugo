@@ -1,0 +1,57 @@
+title = "Gitleaks Configuration for Venture Template"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allowlist for false positives and test data"
+
+# Common Next.js/Vercel/Supabase paths to exclude
+paths = [
+  '''\.env\.example$''',
+  '''\.env\.local\.example$''',
+  '''\.secrets\.example$''',
+  '''node_modules/''',
+  '''\.next/''',
+  '''\.vercel/''',
+  '''pnpm-lock\.yaml$''',
+  '''public/''',
+  '''\.test\.(js|ts|tsx)$''',
+  '''\.spec\.(js|ts|tsx)$''',
+  '''^__tests__/''',
+  '''^tests?/fixtures/''',
+  '''^docs?/'''
+]
+
+# Common test/example patterns
+regexes = [
+  '''(?i)(test|demo|example|fake|mock)[-_]?(key|token|secret|api)''',
+  '''EXAMPLE_''',
+  '''YOUR_.*_HERE''',
+  '''sk_test_''',
+  '''pk_test_''',
+  '''127\.0\.0\.1''',
+  '''localhost''',
+  '''x{10,}''',
+  '''X{10,}'''
+]
+
+# Custom Supabase detection
+[[rules]]
+id = "supabase-service-key"
+description = "Supabase Service Role Key (CRITICAL - never commit!)"
+regex = '''eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6.*"role":"service_role"'''
+tags = ["supabase", "service-key", "critical"]
+
+[[rules]]
+id = "vercel-token"
+description = "Vercel API Token"
+regex = '''(?i)vercel[_-]?(token|api)["\']?\s*[:=]\s*["\']?([a-z0-9]{24,})'''
+tags = ["vercel", "token"]
+
+[[rules]]
+id = "nextauth-secret"
+description = "NextAuth Secret"
+regex = '''NEXTAUTH_SECRET\s*=\s*["\']?[a-z0-9+/=]{32,}["\']?'''
+tags = ["nextauth", "secret"]
+entropy = 4.0

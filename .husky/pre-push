@@ -1,0 +1,49 @@
+# Run GitHub Actions locally before pushing
+echo "🚀 Running CI checks locally before push..."
+
+# Check if act is installed
+if ! command -v act &> /dev/null; then
+  echo "⚠️  act is not installed. Skipping local CI simulation."
+  echo "   Install: brew install act (macOS) or see https://github.com/nektos/act"
+  echo "   Continuing with push..."
+  exit 0
+fi
+
+# Check if Docker is running
+if ! docker info &> /dev/null 2>&1; then
+  echo "⚠️  Docker is not running. Skipping local CI simulation."
+  echo "   Start Docker and try again for local CI checks."
+  echo "   Continuing with push..."
+  exit 0
+fi
+
+echo "📋 Running GitHub Actions workflow locally with act..."
+echo ""
+
+# Run the CI workflow with act
+# --container-architecture linux/amd64 ensures compatibility on Apple Silicon
+# -j validate runs only the validate job
+# --secret-file .secrets passes local secrets (if exists)
+ACT_ARGS="-j validate --container-architecture linux/amd64 --env ACT=true"
+
+# Add secrets file if it exists
+if [ -f ".secrets" ]; then
+  ACT_ARGS="$ACT_ARGS --secret-file .secrets"
+fi
+
+if act push $ACT_ARGS; then
+  echo ""
+  echo "✅ Local CI checks passed!"
+else
+  echo ""
+  echo "❌ Local CI checks failed!"
+  echo ""
+  echo "💡 Options:"
+  echo "   1. Fix the issues and try again"
+  echo "   2. Skip local CI: SKIP=act git push"
+  echo "   3. Check act logs above for details"
+  echo ""
+  echo "Note: act simulates ~79% of GitHub Actions features."
+  echo "Some failures may be false positives."
+  exit 1
+fi
