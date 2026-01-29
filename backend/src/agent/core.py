@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from src.agent.providers import LLMProvider
 from src.agent.tools import BUILTIN_TOOLS
 from src.config import AgentSettings
-from src.robot.controller import RobotController
 from src.integrations.registry import IntegrationRegistry
+from src.robot.controller import RobotController
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +75,8 @@ class AgentOrchestrator:
             frame = await self._robot.get_frame()
             if frame is None:
                 return "Camera not available."
-            result = await processor.analyze_frame(frame, args.get("question", "Describe what you see."))
+            question = args.get("question", "Describe what you see.")
+            result = await processor.analyze_frame(frame, question)
             return result
 
         # Try integration tools
@@ -98,7 +100,8 @@ class AgentOrchestrator:
             messages.append(message)
             for tool_call in message["tool_calls"]:
                 fn = tool_call["function"]
-                args = json.loads(fn["arguments"]) if isinstance(fn["arguments"], str) else fn["arguments"]
+                raw_args = fn["arguments"]
+                args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
                 result = await self._execute_tool(fn["name"], args)
                 messages.append({
                     "role": "tool",

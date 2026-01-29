@@ -42,7 +42,9 @@ class AgentSettings(BaseSettings):
             "You are HUGO, a personal assistant embodied in a Reachy Mini robot.",
         )
     )
-    providers: dict[str, Any] = Field(default_factory=lambda: _yaml.get("agent", {}).get("providers", {}))
+    providers: dict[str, Any] = Field(
+        default_factory=lambda: _yaml.get("agent", {}).get("providers", {})
+    )
 
     model_config = {"env_prefix": "AGENT_"}
 

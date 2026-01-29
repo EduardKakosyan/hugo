@@ -116,8 +116,10 @@ class OutlookIntegration(Integration):
                 messages = resp.json().get("value", [])
                 summaries = []
                 for msg in messages:
+                    from_addr = msg.get("from", {}).get("emailAddress", {})
+                    addr = from_addr.get("address", "unknown")
                     summaries.append(
-                        f"From: {msg.get('from', {}).get('emailAddress', {}).get('address', 'unknown')}\n"
+                        f"From: {addr}\n"
                         f"Subject: {msg.get('subject', '')}\n"
                         f"Preview: {msg.get('bodyPreview', '')[:100]}"
                     )

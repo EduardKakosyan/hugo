@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from src.agent.core import AgentOrchestrator
 from src.api.routes import router as api_router
 from src.api.websocket import router as ws_router
 from src.config import settings
-from src.robot.controller import RobotController
-from src.agent.core import AgentOrchestrator
 from src.integrations.registry import IntegrationRegistry
+from src.robot.controller import RobotController
 
 
 @asynccontextmanager

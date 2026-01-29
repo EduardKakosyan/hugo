@@ -64,7 +64,10 @@ class ObsidianIntegration(Integration):
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "path": {"type": "string", "description": "Note path (e.g. 'folder/note.md')"},
+                            "path": {
+                                "type": "string",
+                                "description": "Note path (e.g. 'folder/note.md')",
+                            },
                         },
                         "required": ["path"],
                     },
@@ -78,8 +81,14 @@ class ObsidianIntegration(Integration):
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "path": {"type": "string", "description": "Note path (e.g. 'folder/note.md')"},
-                            "content": {"type": "string", "description": "Note content in Markdown"},
+                            "path": {
+                                "type": "string",
+                                "description": "Note path (e.g. 'folder/note.md')",
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "Note content in Markdown",
+                            },
                         },
                         "required": ["path", "content"],
                     },

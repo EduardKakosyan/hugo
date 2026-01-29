@@ -113,7 +113,8 @@ class CalendarIntegration(Integration):
                     return "No upcoming events."
                 lines = []
                 for event in events:
-                    start = event.get("start", {}).get("dateTime", event.get("start", {}).get("date", ""))
+                    start_obj = event.get("start", {})
+                    start = start_obj.get("dateTime", start_obj.get("date", ""))
                     lines.append(f"- {event.get('summary', 'No title')} at {start}")
                 return "\n".join(lines)
 

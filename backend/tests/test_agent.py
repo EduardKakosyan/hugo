@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.agent.providers import LLMProvider, PROVIDER_PRESETS
+from src.agent.providers import PROVIDER_PRESETS, LLMProvider
 
 
 class TestLLMProvider:

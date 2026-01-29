@@ -30,7 +30,7 @@ class Integration(ABC):
         import asyncio
 
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
             # Already in async context — use cached tools
             return getattr(self, "_cached_tools", [])
         except RuntimeError:
