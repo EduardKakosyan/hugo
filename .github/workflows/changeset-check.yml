@@ -1,0 +1,40 @@
+name: Changeset Check
+
+on:
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  changeset:
+    name: Check for changeset
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check for changeset
+        run: |
+          # Check if there are any changeset files (excluding README)
+          CHANGESETS=$(find .changeset -name "*.md" ! -name "README.md" 2>/dev/null | wc -l)
+          if [ "$CHANGESETS" -eq "0" ]; then
+            echo "::warning::No changeset found. If this PR should trigger a version bump, run 'pnpm changeset' to create one."
+          else
+            echo "✅ Changeset found"
+          fi

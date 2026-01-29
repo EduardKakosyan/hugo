@@ -1,0 +1,12 @@
+# act configuration for local GitHub Actions simulation
+# See: https://github.com/nektos/act
+
+# Use medium-sized Ubuntu image (good balance of compatibility vs size)
+# Options: micro, medium, large (large is closest to GitHub but ~18GB)
+-P ubuntu-latest=catthehacker/ubuntu:act-latest
+
+# Default to running push events
+push
+
+# Container architecture (important for Apple Silicon Macs)
+--container-architecture linux/amd64
