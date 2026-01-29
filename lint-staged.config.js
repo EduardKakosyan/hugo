@@ -7,7 +7,7 @@ const config = {
   "frontend/**/*.css": ["prettier --write"],
 
   // Python files
-  "backend/**/*.py": ["ruff check --fix"],
+  "backend/**/*.py": ["uv run --project backend ruff check --fix"],
 
   // JSON, Markdown, etc.
   "*.{json,md,mdx,yml,yaml}": ["prettier --write"],

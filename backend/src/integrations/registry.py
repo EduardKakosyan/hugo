@@ -21,9 +21,9 @@ class IntegrationRegistry:
 
     async def discover_and_load(self) -> None:
         """Discover and load available integrations based on config."""
-        from src.integrations.outlook import OutlookIntegration
         from src.integrations.calendar import CalendarIntegration
         from src.integrations.obsidian import ObsidianIntegration
+        from src.integrations.outlook import OutlookIntegration
 
         available: list[tuple[str, type[Integration], dict[str, Any]]] = [
             (
@@ -105,9 +105,11 @@ class IntegrationRegistry:
 
     async def teardown_all(self) -> None:
         """Teardown all integrations."""
-        for integration in self._integrations.values():
+        for name, integration in self._integrations.items():
             try:
                 await integration.teardown()
             except Exception as e:
-                logger.warning("Error tearing down integration: %s", e)
+                logger.warning(
+                    "Error tearing down integration '%s': %s", name, e
+                )
         self._active.clear()

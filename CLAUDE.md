@@ -29,12 +29,12 @@ cd frontend && pnpm build         # Production build
 cd frontend && pnpm lint          # ESLint + Prettier
 cd frontend && pnpm test          # Vitest
 
-# Backend (Python 3.12+)
-cd backend && pip install -e ".[dev]"
-cd backend && uvicorn src.main:app --reload --port 8080
-cd backend && ruff check src/ tests/
-cd backend && mypy src/
-cd backend && pytest
+# Backend (Python 3.12+, uv)
+cd backend && uv sync --dev       # Install dependencies
+cd backend && uv run uvicorn src.main:app --reload --port 8080
+cd backend && uv run ruff check src/ tests/
+cd backend && uv run mypy src/
+cd backend && uv run pytest
 
 # Robot simulator
 reachy-mini-daemon --sim
@@ -43,22 +43,26 @@ reachy-mini-daemon --sim
 ## Git Workflow
 
 **Commit Message Format (enforced by commitlint):**
+
 - Format: `type: description` (lowercase, max 100 chars)
 - Types: `feat`, `fix`, `chore`, `refactor`, `docs`, `test`, `ci`, `perf`
 
 **Before Committing:**
+
 1. Backend: `ruff check`, `mypy`, `pytest`
 2. Frontend: `pnpm lint`, `pnpm test`
 
 ## Code Style
 
 ### Python (Backend)
+
 - Python 3.12+, strict typing, `from __future__ import annotations`
 - Ruff for linting, mypy for type checking
 - FastAPI + Pydantic for API and config
 - `async`/`await` throughout
 
 ### TypeScript (Frontend)
+
 - Svelte 5 with runes (`$state`, `$derived`, `$effect`, `$props`)
 - Tailwind CSS v4 for styling
 - Svelte stores for WebSocket state
@@ -86,12 +90,14 @@ frontend/src/
 ## Boundaries
 
 ### Always Do
-- Use `pnpm` for frontend, `pip` for backend
+
+- Use `pnpm` for frontend, `uv` for backend
 - Follow conventional commit format
 - Add tests for new functionality
 - Use type annotations in both Python and TypeScript
 
 ### Never Do
+
 - Commit secrets, API keys, or .env files
 - Push directly to `main` branch
 - Use `any` type without justification

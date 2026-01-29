@@ -97,8 +97,10 @@ async def chat_ws(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         logger.info("Chat WebSocket disconnected")
     except Exception as e:
-        logger.error("Chat WebSocket error: %s", e)
+        logger.error("Chat WebSocket error: %s", e, exc_info=True)
         try:
             await websocket.send_json({"type": "error", "content": str(e)})
-        except Exception:
-            pass
+        except Exception as send_err:
+            logger.debug(
+                "Failed to send error to chat WebSocket client: %s", send_err
+            )

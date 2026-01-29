@@ -56,25 +56,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
       - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+        run: uv python install 3.12
+        working-directory: backend
 
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        run: uv sync --dev
         working-directory: backend
 
       - name: Run Ruff
-        run: ruff check src/ tests/
+        run: uv run ruff check src/ tests/
         working-directory: backend
 
       - name: Run Mypy
-        run: mypy src/
+        run: uv run mypy src/
         working-directory: backend
 
       - name: Run Pytest
-        run: pytest
+        run: uv run pytest
         working-directory: backend
 
   secrets:

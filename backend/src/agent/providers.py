@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 import litellm
 
@@ -32,10 +33,7 @@ class LLMProvider:
 
     def set_model(self, model: str) -> None:
         """Switch to a different model. Accepts full litellm model string or preset name."""
-        if model in PROVIDER_PRESETS:
-            self._model = PROVIDER_PRESETS[model]
-        else:
-            self._model = model
+        self._model = PROVIDER_PRESETS.get(model, model)
         logger.info("LLM provider switched to: %s", self._model)
 
     async def chat(

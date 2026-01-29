@@ -41,8 +41,13 @@ class RobotController:
                 self._config.host,
                 self._config.port,
             )
-        except Exception:
-            logger.warning("Could not connect to Reachy Mini — running in disconnected mode")
+        except Exception as e:
+            logger.warning(
+                "Could not connect to Reachy Mini at %s:%d — running in disconnected mode: %s",
+                self._config.host,
+                self._config.port,
+                e,
+            )
             self._connected = False
 
     async def disconnect(self) -> None:
@@ -50,8 +55,8 @@ class RobotController:
         if self._mini is not None:
             try:
                 await asyncio.to_thread(self._mini.disconnect)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Error during Reachy Mini disconnect: %s", e)
             self._connected = False
             logger.info("Disconnected from Reachy Mini")
 
@@ -69,8 +74,9 @@ class RobotController:
                     "yaw": getattr(state, "yaw", 0.0),
                 },
             }
-        except Exception:
-            return {"connected": True, "error": "Failed to read state"}
+        except Exception as e:
+            logger.error("Failed to read robot state: %s", e)
+            return {"connected": True, "error": f"Failed to read state: {e}"}
 
     async def goto_target(
         self,
@@ -90,7 +96,9 @@ class RobotController:
             duration=duration,
         )
 
-    async def set_target(self, roll: float = 0.0, pitch: float = 0.0, yaw: float = 0.0) -> None:
+    async def set_target(
+        self, roll: float = 0.0, pitch: float = 0.0, yaw: float = 0.0
+    ) -> None:
         """Set immediate head target (no interpolation)."""
         if not self._connected or self._mini is None:
             return
@@ -108,8 +116,8 @@ class RobotController:
         try:
             frame = await asyncio.to_thread(self._mini.media.get_frame)
             return frame
-        except Exception:
-            logger.warning("Failed to capture camera frame")
+        except Exception as e:
+            logger.warning("Failed to capture camera frame: %s", e)
             return None
 
     async def get_audio(self) -> bytes | None:
@@ -119,7 +127,8 @@ class RobotController:
         try:
             audio = await asyncio.to_thread(self._mini.media.get_audio)
             return audio
-        except Exception:
+        except Exception as e:
+            logger.warning("Failed to capture audio from robot mic: %s", e)
             return None
 
     async def push_audio(self, audio_data: bytes) -> None:
@@ -128,5 +137,5 @@ class RobotController:
             return
         try:
             await asyncio.to_thread(self._mini.media.push_audio, audio_data)
-        except Exception:
-            logger.warning("Failed to push audio to robot")
+        except Exception as e:
+            logger.warning("Failed to push audio to robot speaker: %s", e)

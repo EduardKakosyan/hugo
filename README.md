@@ -16,16 +16,16 @@ User ↔ Frontend (SvelteKit 5) ↔ Backend (FastAPI) ↔ Reachy Mini SDK ↔ Ro
 
 ### Prerequisites
 
-- Python 3.12+
+- Python 3.12+ and [uv](https://docs.astral.sh/uv/)
 - Node.js 20+ and pnpm
-- Reachy Mini SDK (`pip install reachy-mini`)
+- Reachy Mini SDK (installed via uv)
 
 ### Backend
 
 ```bash
 cd backend
-pip install -e ".[dev]"
-uvicorn src.main:app --reload --port 8080
+uv sync --dev
+uv run uvicorn src.main:app --reload --port 8080
 ```
 
 ### Frontend
@@ -54,7 +54,7 @@ reachy-mini-daemon --sim
 
 ```bash
 # Backend linting & testing
-cd backend && ruff check src/ tests/ && mypy src/ && pytest
+cd backend && uv run ruff check src/ tests/ && uv run mypy src/ && uv run pytest
 
 # Frontend linting & testing
 cd frontend && pnpm lint && pnpm test

@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from src.integrations.base import Integration
-from src.integrations.outlook import OutlookIntegration
 from src.integrations.calendar import CalendarIntegration
 from src.integrations.obsidian import ObsidianIntegration
+from src.integrations.outlook import OutlookIntegration
 
 
 class TestIntegrationBase:
