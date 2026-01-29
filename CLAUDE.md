@@ -4,151 +4,95 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a venture startup template optimized for Next.js + Supabase + Vercel deployments. It provides pre-configured:
+HUGO is a personal assistant agent for the Reachy Mini robot. It is a monorepo with two workspaces:
 
-- Git hooks (Husky) for commit linting and formatting
-- ESLint + Prettier for code quality
-- Vitest for unit testing
-- GitHub Actions for CI/CD
-- Changesets for versioning
-- Gitleaks for secret scanning
+- **`backend/`** — Python FastAPI application providing robot control, multi-provider LLM reasoning, voice I/O, vision processing, and an extensible integration plugin system.
+- **`frontend/`** — SvelteKit 5 web dashboard for live video, chat, telemetry, and configuration.
+
+## Architecture
+
+```
+User ↔ Frontend (SvelteKit) ↔ Backend (FastAPI) ↔ Reachy Mini SDK ↔ Robot/Simulator
+                                    ↕
+                              LiteLLM (multi-provider LLM)
+                              Voice Engine (PersonaPlex / Cloud)
+                              Integration Plugins (Outlook, Calendar, Obsidian)
+```
 
 ## Commands
 
 ```bash
-# Package Management (ALWAYS use pnpm, NOT npm or yarn)
-pnpm install          # Install dependencies
-pnpm prepare          # Set up husky git hooks
+# Frontend (pnpm)
+cd frontend && pnpm install
+cd frontend && pnpm dev           # Dev server on :5173
+cd frontend && pnpm build         # Production build
+cd frontend && pnpm lint          # ESLint + Prettier
+cd frontend && pnpm test          # Vitest
 
-# Code Quality
-pnpm lint             # Run ESLint + Prettier check
-pnpm lint:fix         # Fix lint issues automatically
-pnpm type-check       # Run TypeScript compiler check
+# Backend (Python 3.12+)
+cd backend && pip install -e ".[dev]"
+cd backend && uvicorn src.main:app --reload --port 8080
+cd backend && ruff check src/ tests/
+cd backend && mypy src/
+cd backend && pytest
 
-# Testing
-pnpm test             # Run all tests once
-pnpm test:watch       # Run tests in watch mode
-pnpm test:coverage    # Run tests with coverage report
-
-# Versioning
-pnpm changeset        # Create a changeset for versioning
-
-# Security
-pnpm secrets:check    # Scan staged files for secrets
-pnpm secrets:scan     # Scan entire codebase for secrets
+# Robot simulator
+reachy-mini-daemon --sim
 ```
 
 ## Git Workflow
 
-**Branching Strategy:**
-
-- `main` is protected - no direct pushes
-- Create feature branches from `dev`
-- Only `dev` merges into `main` via PR
-- Branch naming: `feat/description`, `fix/description`, `chore/description`
-
 **Commit Message Format (enforced by commitlint):**
-
 - Format: `type: description` (lowercase, max 100 chars)
 - Types: `feat`, `fix`, `chore`, `refactor`, `docs`, `test`, `ci`, `perf`
-- Example: `feat: add user authentication`
 
 **Before Committing:**
-
-1. Run `pnpm lint` - fix any issues
-2. Run `pnpm type-check` - fix any errors
-3. Run `pnpm test` - ensure all pass
-4. Create changeset if needed: `pnpm changeset`
-
-**Git Hooks (automated):**
-
-- `pre-commit`: Runs Gitleaks secret scan + lint-staged
-- `pre-push`: Runs GitHub Actions locally via act (if installed)
-- `commit-msg`: Validates commit message format
-
-Skip hooks if needed: `SKIP=act git push` or `SKIP=gitleaks git commit -m "msg"`
+1. Backend: `ruff check`, `mypy`, `pytest`
+2. Frontend: `pnpm lint`, `pnpm test`
 
 ## Code Style
 
-**TypeScript Strict Mode**: Always enabled. No `any` without justification.
+### Python (Backend)
+- Python 3.12+, strict typing, `from __future__ import annotations`
+- Ruff for linting, mypy for type checking
+- FastAPI + Pydantic for API and config
+- `async`/`await` throughout
 
-**Imports**: Use `@/` alias for src directory imports.
-
-```typescript
-// ✅ Good
-import { utils } from "@/lib/utils";
-
-// ❌ Bad
-import { utils } from "../../../lib/utils";
-```
-
-**Testing Pattern**:
-
-```typescript
-import { describe, it, expect } from "vitest";
-
-describe("ComponentName", () => {
-  it("should do expected behavior", () => {
-    // Arrange
-    const input = "test";
-
-    // Act
-    const result = functionUnderTest(input);
-
-    // Assert
-    expect(result).toBe("expected");
-  });
-});
-```
-
-## Boundaries
-
-### ✅ Always Do
-
-- Use TypeScript strict mode
-- Follow existing patterns in the codebase
-- Add tests for new functionality
-- Run lint/type-check/test before committing
-- Use `pnpm` for package management
-- Follow conventional commit format
-- Create changeset for user-facing changes
-
-### ⚠️ Ask First
-
-- Adding new dependencies
-- Changing configuration files (tsconfig, eslint, etc.)
-- Modifying CI/CD workflows
-- Changing project structure
-
-### 🚫 Never Do
-
-- Commit secrets, API keys, or .env files
-- Push directly to `main` branch
-- Use `any` type without explicit comment justification
-- Disable ESLint rules without justification
-- Skip tests for new features
-- Use `npm` or `yarn` (use `pnpm`)
+### TypeScript (Frontend)
+- Svelte 5 with runes (`$state`, `$derived`, `$effect`, `$props`)
+- Tailwind CSS v4 for styling
+- Svelte stores for WebSocket state
 
 ## Project Structure
 
 ```
-/src
-  /lib              # Utility functions
-    /__tests__      # Tests alongside code
-  /components       # React components (when Next.js added)
-  /hooks            # Custom React hooks (when Next.js added)
-/docs
-  /adr              # Architecture Decision Records
-/.github
-  /workflows        # GitHub Actions
-/.changeset         # Version changesets
+backend/src/
+  main.py           # FastAPI entry point
+  config.py         # Pydantic settings
+  robot/            # Reachy Mini SDK wrapper
+  agent/            # LLM orchestrator + providers + tools
+  voice/            # Voice engine (PersonaPlex + cloud fallback)
+  vision/           # Camera stream + multimodal analysis
+  integrations/     # Plugin system (Outlook, Calendar, Obsidian)
+  api/              # REST + WebSocket endpoints
+
+frontend/src/
+  routes/           # SvelteKit pages (dashboard, integrations, settings)
+  lib/components/   # UI components
+  lib/stores/       # Svelte stores (robot, chat, video, settings)
+  lib/types/        # TypeScript interfaces
 ```
 
-## Adding New Features
+## Boundaries
 
-1. Create feature branch from `dev`
-2. Implement with tests
-3. Run full validation: `pnpm lint && pnpm type-check && pnpm test`
-4. Create changeset: `pnpm changeset`
-5. Commit with conventional format
-6. Create PR using template
+### Always Do
+- Use `pnpm` for frontend, `pip` for backend
+- Follow conventional commit format
+- Add tests for new functionality
+- Use type annotations in both Python and TypeScript
+
+### Never Do
+- Commit secrets, API keys, or .env files
+- Push directly to `main` branch
+- Use `any` type without justification
+- Skip tests for new features
