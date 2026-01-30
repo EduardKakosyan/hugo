@@ -116,6 +116,27 @@ class RobotController:
             logger.error("Failed to read robot state: %s", e)
             return {"connected": True, "error": f"Failed to read state: {e}"}
 
+    async def move(
+        self,
+        roll: float = 0.0,
+        pitch: float = 0.0,
+        yaw: float = 0.0,
+        left_antenna: float | None = None,
+        right_antenna: float | None = None,
+        duration: float = 0.5,
+    ) -> None:
+        """Move head + antennas to target angles (degrees) with interpolation."""
+        if not self._connected or self._mini is None:
+            return
+        pose = _rpy_to_pose(np.radians(roll), np.radians(pitch), np.radians(yaw))
+        kwargs: dict[str, Any] = {"head": pose, "duration": duration}
+        if left_antenna is not None or right_antenna is not None:
+            kwargs["antennas"] = np.array([
+                np.radians(left_antenna if left_antenna is not None else 0.0),
+                np.radians(right_antenna if right_antenna is not None else 0.0),
+            ])
+        await asyncio.to_thread(self._mini.goto_target, **kwargs)
+
     async def goto_target(
         self,
         roll: float = 0.0,
@@ -150,7 +171,7 @@ class RobotController:
         if not self._connected or self._mini is None or not self._media_available:
             return None
         try:
-            frame = await asyncio.to_thread(self._mini.media.get_frame)
+            frame: np.ndarray = await asyncio.to_thread(self._mini.media.get_frame)
             return frame
         except Exception as e:
             logger.warning("Failed to capture camera frame: %s", e)
@@ -161,7 +182,7 @@ class RobotController:
         if not self._connected or self._mini is None or not self._media_available:
             return None
         try:
-            audio = await asyncio.to_thread(self._mini.media.get_audio_sample)
+            audio: bytes | np.ndarray = await asyncio.to_thread(self._mini.media.get_audio_sample)
             return audio
         except Exception as e:
             logger.warning("Failed to capture audio from robot mic: %s", e)

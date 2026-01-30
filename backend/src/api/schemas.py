@@ -37,3 +37,12 @@ class ProviderSwitchRequest(BaseModel):
 
 class VoiceSwitchRequest(BaseModel):
     engine: str  # "personaplex" or "fallback"
+
+
+class RobotMoveRequest(BaseModel):
+    roll: float = 0.0
+    pitch: float = 0.0
+    yaw: float = 0.0
+    left_antenna: float | None = None
+    right_antenna: float | None = None
+    duration: float = 0.5

@@ -1,4 +1,4 @@
-import { writable, get } from 'svelte/store';
+import { writable } from 'svelte/store';
 import type { ChatMessage } from '$lib/types';
 
 export const messages = writable<ChatMessage[]>([]);
@@ -22,10 +22,7 @@ export function connectChat(wsUrl: string): void {
 						last.content += data.content;
 						return [...msgs.slice(0, -1), last];
 					}
-					return [
-						...msgs,
-						{ role: 'assistant', content: data.content, timestamp: Date.now() }
-					];
+					return [...msgs, { role: 'assistant', content: data.content, timestamp: Date.now() }];
 				});
 			}
 

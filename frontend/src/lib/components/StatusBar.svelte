@@ -11,7 +11,8 @@
 
 <div class="flex items-center gap-4 px-4 py-2 bg-gray-800 rounded-lg text-xs text-gray-400">
 	<div class="flex items-center gap-1.5">
-		<span class="h-2 w-2 rounded-full {$robotState.connected ? 'bg-green-400' : 'bg-red-400'}"></span>
+		<span class="h-2 w-2 rounded-full {$robotState.connected ? 'bg-green-400' : 'bg-red-400'}"
+		></span>
 		<span>Robot: {$robotState.connected ? 'Connected' : 'Disconnected'}</span>
 	</div>
 

@@ -24,8 +24,10 @@ export function connectVideo(wsUrl: string): void {
 		});
 	};
 
-	ws.onclose = () => {
+	ws.onclose = (event) => {
 		videoConnected.set(false);
+		// Don't retry if the backend explicitly closed (e.g. simulation mode)
+		if (event.code === 1000) return;
 		setTimeout(() => connectVideo(wsUrl), 3000);
 	};
 

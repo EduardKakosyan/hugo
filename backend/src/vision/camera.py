@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+from collections.abc import AsyncGenerator
 
 import numpy as np
 from PIL import Image
@@ -36,7 +37,7 @@ class CameraStream:
         image.save(buffer, format="JPEG", quality=self._quality)
         return buffer.getvalue()
 
-    async def stream_frames(self, interval: float = 0.05) -> None:
+    async def stream_frames(self, interval: float = 0.05) -> AsyncGenerator[bytes, None]:
         """Generator that yields JPEG frames at the specified interval.
 
         Default interval of 0.05s = 20 FPS.

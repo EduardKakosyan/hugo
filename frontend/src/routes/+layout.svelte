@@ -16,9 +16,15 @@
 				<div class="flex items-center gap-6">
 					<a href="/" class="text-lg font-bold text-white">HUGO</a>
 					<div class="flex gap-4">
-						<a href="/" class="text-sm text-gray-400 hover:text-white transition-colors">Dashboard</a>
-						<a href="/integrations" class="text-sm text-gray-400 hover:text-white transition-colors">Integrations</a>
-						<a href="/settings" class="text-sm text-gray-400 hover:text-white transition-colors">Settings</a>
+						<a href="/" class="text-sm text-gray-400 hover:text-white transition-colors"
+							>Dashboard</a
+						>
+						<a href="/integrations" class="text-sm text-gray-400 hover:text-white transition-colors"
+							>Integrations</a
+						>
+						<a href="/settings" class="text-sm text-gray-400 hover:text-white transition-colors"
+							>Settings</a
+						>
 					</div>
 				</div>
 			</div>

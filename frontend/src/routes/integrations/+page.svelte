@@ -58,7 +58,7 @@
 	{/if}
 
 	<div class="grid gap-4">
-		{#each integrations as integration}
+		{#each integrations as integration (integration.name)}
 			<div class="rounded-lg bg-gray-900 border border-gray-800 p-4">
 				<div class="flex items-center justify-between">
 					<div>
@@ -66,14 +66,21 @@
 						<p class="text-sm text-gray-400 mt-0.5">{integration.description}</p>
 					</div>
 					<div class="flex items-center gap-3">
-						<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium
-							{integration.active ? 'bg-green-900 text-green-300' : 'bg-gray-700 text-gray-400'}">
-							<span class="h-1.5 w-1.5 rounded-full
-								{integration.active ? 'bg-green-400' : 'bg-gray-500'}"></span>
+						<span
+							class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium
+							{integration.active ? 'bg-green-900 text-green-300' : 'bg-gray-700 text-gray-400'}"
+						>
+							<span
+								class="h-1.5 w-1.5 rounded-full
+								{integration.active ? 'bg-green-400' : 'bg-gray-500'}"
+							></span>
 							{integration.active ? 'Active' : 'Inactive'}
 						</span>
 						<button
-							onclick={() => { configuring = integration.name; configValues = {}; }}
+							onclick={() => {
+								configuring = integration.name;
+								configValues = {};
+							}}
 							class="text-sm text-blue-400 hover:text-blue-300"
 						>
 							Configure
@@ -84,29 +91,58 @@
 				{#if configuring === integration.name}
 					<div class="mt-4 pt-4 border-t border-gray-800 space-y-3">
 						{#if integration.name === 'outlook'}
-							<input type="text" placeholder="Client ID" bind:value={configValues.client_id}
-								class="w-full rounded bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200" />
-							<input type="password" placeholder="Client Secret" bind:value={configValues.client_secret}
-								class="w-full rounded bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200" />
-							<input type="text" placeholder="Tenant ID" bind:value={configValues.tenant_id}
-								class="w-full rounded bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200" />
+							<input
+								type="text"
+								placeholder="Client ID"
+								bind:value={configValues.client_id}
+								class="w-full rounded bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200"
+							/>
+							<input
+								type="password"
+								placeholder="Client Secret"
+								bind:value={configValues.client_secret}
+								class="w-full rounded bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200"
+							/>
+							<input
+								type="text"
+								placeholder="Tenant ID"
+								bind:value={configValues.tenant_id}
+								class="w-full rounded bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200"
+							/>
 						{:else if integration.name === 'calendar'}
-							<textarea placeholder="Google Calendar Credentials JSON" bind:value={configValues.credentials_json}
+							<textarea
+								placeholder="Google Calendar Credentials JSON"
+								bind:value={configValues.credentials_json}
 								rows="4"
-								class="w-full rounded bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200"></textarea>
+								class="w-full rounded bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200"
+							></textarea>
 						{:else if integration.name === 'obsidian'}
-							<input type="password" placeholder="API Key" bind:value={configValues.api_key}
-								class="w-full rounded bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200" />
-							<input type="text" placeholder="Host (http://localhost:27124)" bind:value={configValues.host}
-								class="w-full rounded bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200" />
+							<input
+								type="password"
+								placeholder="API Key"
+								bind:value={configValues.api_key}
+								class="w-full rounded bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200"
+							/>
+							<input
+								type="text"
+								placeholder="Host (http://localhost:27124)"
+								bind:value={configValues.host}
+								class="w-full rounded bg-gray-800 border border-gray-700 px-3 py-2 text-sm text-gray-200"
+							/>
 						{/if}
 						<div class="flex gap-2">
-							<button onclick={() => configure(integration.name)}
-								class="rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700">
+							<button
+								onclick={() => configure(integration.name)}
+								class="rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700"
+							>
 								Save
 							</button>
-							<button onclick={() => { configuring = null; }}
-								class="rounded bg-gray-700 px-3 py-1.5 text-sm font-medium text-gray-300 hover:bg-gray-600">
+							<button
+								onclick={() => {
+									configuring = null;
+								}}
+								class="rounded bg-gray-700 px-3 py-1.5 text-sm font-medium text-gray-300 hover:bg-gray-600"
+							>
 								Cancel
 							</button>
 						</div>

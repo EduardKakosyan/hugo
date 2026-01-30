@@ -10,6 +10,7 @@ from src.api.schemas import (
     IntegrationConfigRequest,
     IntegrationInfo,
     ProviderSwitchRequest,
+    RobotMoveRequest,
     StatusResponse,
     VoiceSwitchRequest,
 )
@@ -65,6 +66,21 @@ async def switch_provider(request: Request, body: ProviderSwitchRequest) -> dict
     model = body.model or body.provider
     agent.llm.set_model(model)
     return {"model": agent.llm.model}
+
+
+@router.post("/robot/move")
+async def robot_move(request: Request, body: RobotMoveRequest) -> dict[str, str]:
+    """Move the robot head and antennas to target angles."""
+    robot = request.app.state.robot
+    await robot.move(
+        roll=body.roll,
+        pitch=body.pitch,
+        yaw=body.yaw,
+        left_antenna=body.left_antenna,
+        right_antenna=body.right_antenna,
+        duration=body.duration,
+    )
+    return {"status": "ok"}
 
 
 @router.post("/settings/voice")

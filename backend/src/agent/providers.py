@@ -53,7 +53,8 @@ class LLMProvider:
             kwargs["tool_choice"] = "auto"
 
         response = await litellm.acompletion(**kwargs)
-        return response.model_dump()
+        result: dict[str, Any] = response.model_dump()
+        return result
 
     async def stream_chat(
         self,

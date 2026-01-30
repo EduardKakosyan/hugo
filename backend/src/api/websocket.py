@@ -13,6 +13,87 @@ from src.vision.camera import CameraStream
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# ── Simulator video relay ────────────────────────────────────────────────────
+# The daemon connects as a WS client to /video_stream and pushes JPEG frames.
+# Frontend clients connect to /ws/sim_video to receive those frames.
+
+_sim_frame: bytes | None = None
+_sim_subscribers: set[WebSocket] = set()
+
+
+@router.websocket("/video_stream")
+async def sim_video_ingest(websocket: WebSocket) -> None:
+    """Receive JPEG frames from the reachy-mini daemon."""
+    global _sim_frame  # noqa: PLW0603
+    await websocket.accept()
+    logger.info("Simulator video ingest connected")
+
+    try:
+        while True:
+            data = await websocket.receive_bytes()
+            _sim_frame = data
+            # Broadcast to all subscribed frontend clients
+            dead: list[WebSocket] = []
+            for sub in _sim_subscribers:
+                try:
+                    await sub.send_bytes(data)
+                except Exception:
+                    dead.append(sub)
+            for d in dead:
+                _sim_subscribers.discard(d)
+    except WebSocketDisconnect:
+        logger.info("Simulator video ingest disconnected")
+    except Exception as e:
+        logger.error("Simulator video ingest error: %s", e)
+
+
+@router.websocket("/audio_stream")
+async def sim_audio_ingest(websocket: WebSocket) -> None:
+    """Accept audio stream from the reachy-mini daemon (currently unused)."""
+    await websocket.accept()
+    logger.info("Simulator audio ingest connected")
+    try:
+        while True:
+            await websocket.receive_bytes()
+    except WebSocketDisconnect:
+        logger.info("Simulator audio ingest disconnected")
+    except Exception as e:
+        logger.error("Simulator audio ingest error: %s", e)
+
+
+@router.websocket("/robot")
+async def sim_robot_control(websocket: WebSocket) -> None:
+    """Accept robot control channel from the reachy-mini daemon (currently unused)."""
+    await websocket.accept()
+    logger.info("Simulator robot control channel connected")
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        logger.info("Simulator robot control channel disconnected")
+    except Exception as e:
+        logger.error("Simulator robot control channel error: %s", e)
+
+
+@router.websocket("/ws/sim_video")
+async def sim_video_feed(websocket: WebSocket) -> None:
+    """Stream simulator video frames to frontend clients."""
+    await websocket.accept()
+    _sim_subscribers.add(websocket)
+    logger.info("Simulator video subscriber connected (%d total)", len(_sim_subscribers))
+
+    try:
+        # Keep the connection alive; frames are pushed via broadcast above
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.error("Simulator video subscriber error: %s", e)
+    finally:
+        _sim_subscribers.discard(websocket)
+        logger.info("Simulator video subscriber disconnected (%d remaining)", len(_sim_subscribers))
+
 
 @router.websocket("/ws/telemetry")
 async def telemetry_ws(websocket: WebSocket) -> None:

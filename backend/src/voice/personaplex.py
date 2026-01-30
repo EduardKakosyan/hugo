@@ -58,7 +58,7 @@ class PersonaPlexEngine:
         if isinstance(response, str):
             return response
         # Binary response — extract text if available
-        return response.decode("utf-8", errors="replace")
+        return str(response.decode("utf-8", errors="replace"))
 
     async def text_to_speech(self, text: str) -> bytes:
         """Send text to PersonaPlex and get speech audio back.
@@ -73,7 +73,7 @@ class PersonaPlexEngine:
 
         if isinstance(response, bytes):
             return response
-        return response.encode("utf-8")
+        return bytes(response.encode("utf-8"))
 
     async def stream_bidirectional(
         self,

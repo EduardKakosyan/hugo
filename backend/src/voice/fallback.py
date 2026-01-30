@@ -32,7 +32,8 @@ class CloudVoiceEngine:
                 timeout=30.0,
             )
             response.raise_for_status()
-            return response.json().get("text", "")
+            result: str = response.json().get("text", "")
+            return result
 
     async def text_to_speech(self, text: str) -> bytes:
         """Generate speech using OpenAI TTS API."""

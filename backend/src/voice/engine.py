@@ -47,13 +47,15 @@ class VoiceEngine:
         """Convert speech audio to text."""
         if self._engine is None:
             await self.initialize()
-        return await self._engine.speech_to_text(audio_data)
+        result: str = await self._engine.speech_to_text(audio_data)
+        return result
 
     async def text_to_speech(self, text: str) -> bytes:
         """Convert text to speech audio."""
         if self._engine is None:
             await self.initialize()
-        return await self._engine.text_to_speech(text)
+        result: bytes = await self._engine.text_to_speech(text)
+        return result
 
     def switch_engine(self, engine_name: str) -> None:
         """Switch to a different voice engine. Requires re-initialization."""

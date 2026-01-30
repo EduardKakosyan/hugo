@@ -80,9 +80,9 @@ class AgentOrchestrator:
             return result
 
         # Try integration tools
-        result = await self._integrations.execute_tool(name, args)
-        if result is not None:
-            return result
+        integration_result = await self._integrations.execute_tool(name, args)
+        if integration_result is not None:
+            return integration_result
 
         return f"Unknown tool: {name}"
 
@@ -114,7 +114,7 @@ class AgentOrchestrator:
             choice = response["choices"][0]
             message = choice["message"]
 
-        content = message.get("content", "")
+        content: str = message.get("content") or ""
 
         # Update history
         self._history.append({"role": "user", "content": user_message})
@@ -124,7 +124,7 @@ class AgentOrchestrator:
         if len(self._history) > 40:
             self._history = self._history[-30:]
 
-        return content
+        return str(content)
 
     async def stream_chat(self, user_message: str) -> AsyncIterator[str]:
         """Stream a chat response token by token."""
