@@ -24,11 +24,20 @@ class SimulatorManager:
 
         self._process = await asyncio.to_thread(
             subprocess.Popen,
-            ["reachy-mini-daemon", "--sim", "--port", str(port)],
+            [
+                "reachy-mini-daemon",
+                "--sim",
+                "--headless",
+                "--deactivate-audio",
+                "--fastapi-port",
+                str(port),
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
         logger.info("Started Reachy Mini simulator on port %d (PID: %d)", port, self._process.pid)
+        # Give the daemon a moment to initialize
+        await asyncio.sleep(3)
 
     async def stop(self) -> None:
         """Stop the simulator daemon."""

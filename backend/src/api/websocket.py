@@ -37,6 +37,12 @@ async def video_ws(websocket: WebSocket) -> None:
     """Stream camera frames as JPEG bytes."""
     await websocket.accept()
     robot = websocket.app.state.robot
+
+    if not robot.media_available:
+        logger.info("Video WebSocket: media not available (simulation mode), closing")
+        await websocket.close(code=1000, reason="Media not available in simulation mode")
+        return
+
     camera = CameraStream(robot)
 
     try:
