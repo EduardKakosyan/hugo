@@ -1,3 +1,9 @@
+# Skip hook when SKIP=act is set
+if [ "$SKIP" = "act" ]; then
+  echo "⏭️  Skipping local CI (SKIP=act)"
+  exit 0
+fi
+
 # Run GitHub Actions locally before pushing
 echo "🚀 Running CI checks locally before push..."
 
@@ -20,15 +26,20 @@ fi
 echo "📋 Running GitHub Actions workflow locally with act..."
 echo ""
 
-# Run the CI workflow with act
 # --container-architecture linux/amd64 ensures compatibility on Apple Silicon
-# -j validate runs only the validate job
 # --secret-file .secrets passes local secrets (if exists)
-ACT_ARGS="-j validate --container-architecture linux/amd64 --env ACT=true"
+ACT_ARGS="--container-architecture linux/amd64 --env ACT=true"
 
 # Add secrets file if it exists
 if [ -f ".secrets" ]; then
   ACT_ARGS="$ACT_ARGS --secret-file .secrets"
+fi
+
+# Dry-run to check if any jobs exist before running
+if ! act push --list $ACT_ARGS 2>/dev/null | grep -q .; then
+  echo "⚠️  No CI workflow jobs found for push event. Skipping local CI."
+  echo "   Continuing with push..."
+  exit 0
 fi
 
 if act push $ACT_ARGS; then
@@ -41,7 +52,8 @@ else
   echo "💡 Options:"
   echo "   1. Fix the issues and try again"
   echo "   2. Skip local CI: SKIP=act git push"
-  echo "   3. Check act logs above for details"
+  echo "   3. Push without hooks: git push --no-verify"
+  echo "   4. Check act logs above for details"
   echo ""
   echo "Note: act simulates ~79% of GitHub Actions features."
   echo "Some failures may be false positives."
