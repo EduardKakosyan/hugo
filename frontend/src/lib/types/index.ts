@@ -24,6 +24,8 @@ export interface WSMessage {
 		| 'chat:done'
 		| 'chat:error'
 		| 'voice:transcript'
-		| 'voice:response';
+		| 'voice:response'
+		| 'voice:status'
+		| 'voice:error';
 	data: string;
 }

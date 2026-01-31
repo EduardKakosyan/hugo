@@ -5,6 +5,7 @@ export const messages = writable<ChatMessage[]>([]);
 export const isLoading = writable(false);
 export const wsConnected = writable(false);
 export const voiceTranscripts = writable<string[]>([]);
+export const voiceActive = writable(false);
 
 let nextId = 0;
 let ws: WebSocket | null = null;
@@ -71,6 +72,10 @@ function handleWsMessage(event: MessageEvent): void {
 			voiceTranscripts.update((t) => [...t, `Hugo: ${data.text}`]);
 			break;
 		}
+		case 'voice:status': {
+			voiceActive.set(data.active);
+			break;
+		}
 		case 'pong':
 			break;
 	}
@@ -113,6 +118,12 @@ export function disconnectWs(): void {
 	ws?.close();
 	ws = null;
 	wsConnected.set(false);
+}
+
+export function toggleVoice(): void {
+	if (!ws || ws.readyState !== WebSocket.OPEN) return;
+	const active = get(voiceActive);
+	ws.send(JSON.stringify({ type: active ? 'voice:stop' : 'voice:start' }));
 }
 
 export function sendChat(message: string): void {

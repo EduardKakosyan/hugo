@@ -7,6 +7,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from src.bridge.openclaw import openclaw_client
+from src.voice.pipeline import voice_pipeline
 
 logger = logging.getLogger("hugo.api.ws")
 
@@ -79,6 +80,23 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                     await ws.send_text(
                         json.dumps({"type": "chat:error", "data": json.dumps({"error": str(e)})})
                     )
+
+            elif msg_type == "voice:start":
+                try:
+                    await voice_pipeline.start()
+                    await broadcast("voice:status", {"active": True})
+                except Exception as e:
+                    logger.error("Failed to start voice pipeline: %s", e)
+                    await ws.send_text(
+                        json.dumps({
+                            "type": "voice:error",
+                            "data": json.dumps({"error": str(e)}),
+                        })
+                    )
+
+            elif msg_type == "voice:stop":
+                await voice_pipeline.stop()
+                await broadcast("voice:status", {"active": False})
 
     except WebSocketDisconnect:
         pass
