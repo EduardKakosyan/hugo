@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { messages, isLoading, sendChat } from '$lib/stores/chatStore';
+	import { messages, isLoading, sendChat, voiceActive, toggleVoice, wsConnected } from '$lib/stores/chatStore';
 
 	let input = $state('');
 	let messagesContainer: HTMLDivElement;
@@ -49,6 +49,30 @@
 	</div>
 
 	<form onsubmit={handleSubmit} class="border-t border-[var(--color-border)] p-3 flex gap-2">
+		<button
+			type="button"
+			onclick={toggleVoice}
+			disabled={!$wsConnected}
+			class="rounded-md px-3 py-2 text-sm font-medium transition-colors disabled:opacity-50 {$voiceActive
+				? 'bg-red-500 text-white hover:bg-red-600'
+				: 'bg-[var(--color-border)] text-[var(--color-text)] hover:bg-[var(--color-border)]/80'}"
+			title={$voiceActive ? 'Stop listening' : 'Start listening'}
+		>
+			<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+				{#if $voiceActive}
+					<path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+					<path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+					<line x1="12" x2="12" y1="19" y2="22"/>
+				{:else}
+					<line x1="2" x2="22" y1="2" y2="22"/>
+					<path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2"/>
+					<path d="M5 10v2a7 7 0 0 0 12 0"/>
+					<path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/>
+					<path d="M9 9v3a3 3 0 0 0 5.12 2.12"/>
+					<line x1="12" x2="12" y1="19" y2="22"/>
+				{/if}
+			</svg>
+		</button>
 		<input
 			type="text"
 			bind:value={input}
