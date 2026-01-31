@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -19,7 +20,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     from src.bridge.openclaw import openclaw_client
     from src.voice.pipeline import voice_pipeline
 
-    await openclaw_client.connect()
+    try:
+        await asyncio.wait_for(openclaw_client.connect(), timeout=5.0)
+    except Exception:
+        logger.warning("OpenClaw not available – continuing without AI bridge", exc_info=True)
 
     async def on_transcript(text: str) -> None:
         logger.info("Transcript: %s", text)
