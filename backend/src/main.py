@@ -31,11 +31,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     voice_pipeline.on_transcript = on_transcript
 
-    try:
-        await voice_pipeline.start()
-    except Exception:
-        logger.warning("Voice pipeline failed to start – continuing without voice", exc_info=True)
-
     yield
 
     await voice_pipeline.stop()
