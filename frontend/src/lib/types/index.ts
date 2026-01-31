@@ -28,6 +28,8 @@ export interface WSMessage {
 		| 'voice:response'
 		| 'voice:status'
 		| 'voice:error'
-		| 'session:reset';
+		| 'session:reset'
+		| 'vision:provider'
+		| 'vision:error';
 	data: string;
 }

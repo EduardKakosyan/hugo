@@ -5,7 +5,7 @@ import logging
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from src.vision.gemini import gemini_vision
+from src.vision import get_active_provider_name, get_provider
 from src.voice.pipeline import voice_pipeline
 
 logger = logging.getLogger("hugo.bridge.tools")
@@ -37,7 +37,8 @@ class StatusResponse(BaseModel):
 @router.post("/vision/analyze", response_model=VisionResponse)
 async def analyze_vision(req: VisionRequest) -> VisionResponse:
     try:
-        description = await gemini_vision.analyze(req.query)
+        provider = get_provider()
+        description = await provider.analyze(req.query)
         return VisionResponse(description=description)
     except Exception as e:
         logger.error("Vision analysis failed: %s", e)
@@ -58,6 +59,6 @@ async def speak_text(req: SpeakRequest) -> SpeakResponse:
 async def tool_status() -> StatusResponse:
     services: dict[str, str] = {
         "voice_pipeline": "ok" if voice_pipeline._models_loaded else "not_loaded",
-        "gemini": "configured" if gemini_vision._client is not None else "not_configured",
+        "vision_provider": get_active_provider_name(),
     }
     return StatusResponse(status="ok", services=services)

@@ -1,5 +1,6 @@
 import { writable, get } from 'svelte/store';
 import type { ChatMessage, WSMessage } from '$lib/types';
+import { visionProvider } from '$lib/stores/settingsStore';
 
 export const messages = writable<ChatMessage[]>([]);
 export const isLoading = writable(false);
@@ -90,6 +91,11 @@ function handleWsMessage(event: MessageEvent): void {
 			voiceActive.set(data.active);
 			break;
 		}
+		case 'vision:provider': {
+			visionProvider.set(data.provider);
+			break;
+		}
+		case 'vision:error':
 		case 'session:reset':
 		case 'pong':
 			break;
@@ -139,6 +145,11 @@ export function toggleVoice(): void {
 	if (!ws || ws.readyState !== WebSocket.OPEN) return;
 	const active = get(voiceActive);
 	ws.send(JSON.stringify({ type: active ? 'voice:stop' : 'voice:start' }));
+}
+
+export function setVisionProvider(provider: 'gemini' | 'mlx'): void {
+	if (!ws || ws.readyState !== WebSocket.OPEN) return;
+	ws.send(JSON.stringify({ type: 'vision:set-provider', data: provider }));
 }
 
 export function sendChat(message: string): void {

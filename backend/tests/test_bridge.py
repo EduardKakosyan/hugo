@@ -90,12 +90,11 @@ class TestOpenClawClient:
 
 class TestToolEndpoints:
     @patch("src.bridge.tools.voice_pipeline")
-    @patch("src.bridge.tools.gemini_vision")
-    def test_status_endpoint(self, mock_vision, mock_voice):
+    @patch("src.bridge.tools.get_active_provider_name", return_value="gemini")
+    def test_status_endpoint(self, mock_provider_name, mock_voice):
         from src.main import app
 
         mock_voice._models_loaded = False
-        mock_vision._client = None
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get("/tools/status")
@@ -113,11 +112,13 @@ class TestToolEndpoints:
         resp = client.post("/tools/voice/speak", json={"text": "hello"})
         assert resp.status_code == 200
 
-    @patch("src.bridge.tools.gemini_vision")
-    def test_vision_endpoint(self, mock_vision):
+    @patch("src.bridge.tools.get_provider")
+    def test_vision_endpoint(self, mock_get_provider):
         from src.main import app
 
-        mock_vision.analyze = AsyncMock(return_value="I see things")
+        mock_provider = AsyncMock()
+        mock_provider.analyze = AsyncMock(return_value="I see things")
+        mock_get_provider.return_value = mock_provider
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post("/tools/vision/analyze", json={"query": "describe"})

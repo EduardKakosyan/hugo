@@ -1,6 +1,15 @@
 <script lang="ts">
+	import { visionProvider } from '$lib/stores/settingsStore';
+	import { setVisionProvider } from '$lib/stores/chatStore';
+
 	let analysis = $state('No analysis yet.');
 	let loading = $state(false);
+
+	function toggleProvider() {
+		const next = $visionProvider === 'gemini' ? 'mlx' : 'gemini';
+		visionProvider.set(next);
+		setVisionProvider(next);
+	}
 
 	async function analyze() {
 		loading = true;
@@ -23,13 +32,22 @@
 <div class="rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)]">
 	<div class="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-2">
 		<span class="text-sm font-medium text-[var(--color-text)]">Vision</span>
-		<button
-			onclick={analyze}
-			disabled={loading}
-			class="rounded-md bg-[var(--color-accent)] px-3 py-1 text-xs font-medium text-white hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
-		>
-			{loading ? 'Analyzing...' : 'Capture'}
-		</button>
+		<div class="flex items-center gap-2">
+			<button
+				onclick={toggleProvider}
+				class="rounded-md border border-[var(--color-border)] px-2 py-1 text-xs font-medium text-[var(--color-text-muted)] hover:bg-[var(--color-border)]"
+				title="Switch vision provider"
+			>
+				{$visionProvider === 'gemini' ? 'Gemini' : 'MLX'}
+			</button>
+			<button
+				onclick={analyze}
+				disabled={loading}
+				class="rounded-md bg-[var(--color-accent)] px-3 py-1 text-xs font-medium text-white hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+			>
+				{loading ? 'Analyzing...' : 'Capture'}
+			</button>
+		</div>
 	</div>
 	<div class="p-4 text-sm text-[var(--color-text-muted)]">
 		{analysis}
