@@ -2,8 +2,7 @@
 	import ChatPanel from '$lib/components/ChatPanel.svelte';
 	import VisionPanel from '$lib/components/VisionPanel.svelte';
 	import TranscriptLog from '$lib/components/TranscriptLog.svelte';
-
-	let transcripts = $state<string[]>([]);
+	import { voiceTranscripts } from '$lib/stores/chatStore';
 </script>
 
 <div class="grid h-[calc(100vh-5rem)] grid-cols-1 gap-6 lg:grid-cols-3">
@@ -12,6 +11,6 @@
 	</div>
 	<div class="flex flex-col gap-6">
 		<VisionPanel />
-		<TranscriptLog {transcripts} />
+		<TranscriptLog transcripts={$voiceTranscripts} />
 	</div>
 </div>

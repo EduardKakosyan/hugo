@@ -15,6 +15,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     logger.info("HUGO backend starting on %s:%d", settings.host, settings.port)
     # Import here to avoid circular imports and allow graceful degradation
+    from src.api.websocket import broadcast
     from src.bridge.openclaw import openclaw_client
     from src.voice.pipeline import voice_pipeline
 
@@ -22,8 +23,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     async def on_transcript(text: str) -> None:
         logger.info("Transcript: %s", text)
+        await broadcast("voice:transcript", {"text": text})
         response = await openclaw_client.send_message(text)
         if response:
+            await broadcast("voice:response", {"text": response})
             await voice_pipeline.speak(response)
 
     voice_pipeline.on_transcript = on_transcript
