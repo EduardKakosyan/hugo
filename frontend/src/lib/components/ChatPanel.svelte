@@ -71,7 +71,7 @@
 						</svg>
 					{/if}
 					<div
-						class="rounded-lg px-3 py-2 text-sm {msg.role === 'user'
+						class="rounded-lg px-3 py-2 text-sm min-w-0 break-words {msg.role === 'user'
 							? 'bg-[var(--color-accent)] text-white whitespace-pre-wrap'
 							: 'bg-[var(--color-border)] text-[var(--color-text)] markdown-content'}"
 					>
