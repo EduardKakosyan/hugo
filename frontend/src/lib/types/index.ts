@@ -4,6 +4,7 @@ export interface ChatMessage {
 	content: string;
 	timestamp: number;
 	streaming?: boolean;
+	source?: 'voice' | 'typed';
 }
 
 export interface ServiceStatus {
@@ -26,6 +27,9 @@ export interface WSMessage {
 		| 'voice:transcript'
 		| 'voice:response'
 		| 'voice:status'
-		| 'voice:error';
+		| 'voice:error'
+		| 'session:reset'
+		| 'vision:provider'
+		| 'vision:error';
 	data: string;
 }

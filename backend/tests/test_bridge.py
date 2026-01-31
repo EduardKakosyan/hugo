@@ -1,53 +1,100 @@
 """Tests for bridge modules (OpenClaw client, tool endpoints)."""
 
-from unittest.mock import AsyncMock, patch
+import asyncio
+import json
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
 
 class TestOpenClawClient:
-    @patch("src.bridge.openclaw.httpx.AsyncClient")
-    async def test_send_message_success(self, mock_client_cls):
+    async def test_send_message_success(self):
         from src.bridge.openclaw import OpenClawClient
 
-        mock_response = AsyncMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"response": "Hello!"}
-        mock_response.raise_for_status = AsyncMock()
-
-        mock_client = AsyncMock()
-        mock_client.post.return_value = mock_response
-        mock_client_cls.return_value = mock_client
-
         client = OpenClawClient()
-        client._client = mock_client
 
-        result = await client.send_message("hi")
+        # Simulate an already-connected state with a mock websocket
+        mock_ws = AsyncMock()
+        client._ws = mock_ws
+        client._connected = True
+
+        # Set up the listener to resolve the pending future when send is called
+        req_id_holder: list[str] = []
+
+        async def fake_send(data):
+            msg = json.loads(data)
+            req_id_holder.append(msg["id"])
+
+        mock_ws.send = fake_send
+
+        # Run send_message in a task so we can resolve the future
+        async def do_send():
+            return await client.send_message("hi")
+
+        task = asyncio.create_task(do_send())
+        # Let the send happen
+        await asyncio.sleep(0.05)
+
+        # Resolve the pending future as if the listener got the response
+        req_id = req_id_holder[0]
+        fut = client._pending[req_id]
+        fut.set_result({"status": "ok", "text": "Hello!"})
+
+        result = await task
         assert result == "Hello!"
 
-    @patch("src.bridge.openclaw.httpx.AsyncClient")
-    async def test_send_message_failure(self, mock_client_cls):
+    async def test_send_message_failure(self):
         from src.bridge.openclaw import OpenClawClient
 
-        mock_client = AsyncMock()
-        mock_client.post.side_effect = Exception("connection refused")
-        mock_client_cls.return_value = mock_client
-
         client = OpenClawClient()
-        client._client = mock_client
+
+        # Simulate connected state but send raises
+        mock_ws = AsyncMock()
+        mock_ws.send.side_effect = Exception("connection refused")
+        client._ws = mock_ws
+        client._connected = True
 
         result = await client.send_message("hi")
         assert result is None
 
+    async def test_reset_session(self):
+        from src.bridge.openclaw import OpenClawClient
+
+        client = OpenClawClient()
+        old_key = client._session_key
+        client.reset_session()
+        assert client._session_key != old_key
+        assert client._session_key.startswith("hugo-")
+
+    async def test_session_key_used_in_send(self):
+        from src.bridge.openclaw import OpenClawClient
+
+        client = OpenClawClient()
+        mock_ws = AsyncMock()
+        client._ws = mock_ws
+        client._connected = True
+
+        sent_messages: list[dict] = []
+
+        async def capture_send(data):
+            sent_messages.append(json.loads(data))
+
+        mock_ws.send = capture_send
+
+        # Start streaming send (non-blocking)
+        req_id = await client.send_message_streaming("hi")
+
+        assert len(sent_messages) == 1
+        assert sent_messages[0]["params"]["sessionKey"] == client._session_key
+
 
 class TestToolEndpoints:
     @patch("src.bridge.tools.voice_pipeline")
-    @patch("src.bridge.tools.gemini_vision")
-    def test_status_endpoint(self, mock_vision, mock_voice):
+    @patch("src.bridge.tools.get_active_provider_name", return_value="gemini")
+    def test_status_endpoint(self, mock_provider_name, mock_voice):
         from src.main import app
 
         mock_voice._models_loaded = False
-        mock_vision._client = None
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get("/tools/status")
@@ -65,11 +112,13 @@ class TestToolEndpoints:
         resp = client.post("/tools/voice/speak", json={"text": "hello"})
         assert resp.status_code == 200
 
-    @patch("src.bridge.tools.gemini_vision")
-    def test_vision_endpoint(self, mock_vision):
+    @patch("src.bridge.tools.get_provider")
+    def test_vision_endpoint(self, mock_get_provider):
         from src.main import app
 
-        mock_vision.analyze = AsyncMock(return_value="I see things")
+        mock_provider = AsyncMock()
+        mock_provider.analyze = AsyncMock(return_value="I see things")
+        mock_get_provider.return_value = mock_provider
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post("/tools/vision/analyze", json={"query": "describe"})

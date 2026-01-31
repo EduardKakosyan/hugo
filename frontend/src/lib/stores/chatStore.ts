@@ -1,10 +1,10 @@
 import { writable, get } from 'svelte/store';
 import type { ChatMessage, WSMessage } from '$lib/types';
+import { visionProvider } from '$lib/stores/settingsStore';
 
 export const messages = writable<ChatMessage[]>([]);
 export const isLoading = writable(false);
 export const wsConnected = writable(false);
-export const voiceTranscripts = writable<string[]>([]);
 export const voiceActive = writable(false);
 
 let nextId = 0;
@@ -17,15 +17,30 @@ const reqIdToMsgId = new Map<string, string>();
 export function addMessage(
 	role: 'user' | 'assistant',
 	content: string,
-	streaming = false
+	streaming = false,
+	source: 'voice' | 'typed' = 'typed'
 ): string {
 	const id = String(nextId++);
-	messages.update((msgs) => [...msgs, { id, role, content, timestamp: Date.now(), streaming }]);
+	messages.update((msgs) => [
+		...msgs,
+		{ id, role, content, timestamp: Date.now(), streaming, source }
+	]);
 	return id;
 }
 
 function updateMessage(id: string, updater: (msg: ChatMessage) => ChatMessage): void {
 	messages.update((msgs) => msgs.map((m) => (m.id === id ? updater(m) : m)));
+}
+
+export function clearChat(): void {
+	messages.set([]);
+}
+
+export function resetSession(): void {
+	clearChat();
+	if (ws && ws.readyState === WebSocket.OPEN) {
+		ws.send(JSON.stringify({ type: 'session:reset' }));
+	}
 }
 
 function handleWsMessage(event: MessageEvent): void {
@@ -65,17 +80,23 @@ function handleWsMessage(event: MessageEvent): void {
 			break;
 		}
 		case 'voice:transcript': {
-			voiceTranscripts.update((t) => [...t, `You: ${data.text}`]);
+			addMessage('user', data.text, false, 'voice');
 			break;
 		}
 		case 'voice:response': {
-			voiceTranscripts.update((t) => [...t, `Hugo: ${data.text}`]);
+			addMessage('assistant', data.text, false, 'voice');
 			break;
 		}
 		case 'voice:status': {
 			voiceActive.set(data.active);
 			break;
 		}
+		case 'vision:provider': {
+			visionProvider.set(data.provider);
+			break;
+		}
+		case 'vision:error':
+		case 'session:reset':
 		case 'pong':
 			break;
 	}
@@ -124,6 +145,11 @@ export function toggleVoice(): void {
 	if (!ws || ws.readyState !== WebSocket.OPEN) return;
 	const active = get(voiceActive);
 	ws.send(JSON.stringify({ type: active ? 'voice:stop' : 'voice:start' }));
+}
+
+export function setVisionProvider(provider: 'gemini' | 'mlx'): void {
+	if (!ws || ws.readyState !== WebSocket.OPEN) return;
+	ws.send(JSON.stringify({ type: 'vision:set-provider', data: provider }));
 }
 
 export function sendChat(message: string): void {
