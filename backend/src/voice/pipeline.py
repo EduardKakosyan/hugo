@@ -38,7 +38,7 @@ class VoicePipeline:
         self._models_loaded = True
 
     async def start(self) -> None:
-        self._load_models()
+        await asyncio.to_thread(self._load_models)
         self._loop = asyncio.get_running_loop()
         self._running = True
         self._speech_buffer = []
@@ -74,6 +74,7 @@ class VoicePipeline:
         if result["speech_end"] and self._speech_buffer:
             audio = np.concatenate(self._speech_buffer)
             self._speech_buffer = []
+            vad.reset()
             if self._loop is not None:
                 self._loop.call_soon_threadsafe(
                     asyncio.ensure_future,
@@ -89,9 +90,15 @@ class VoicePipeline:
             await self.on_transcript(text)
 
     async def speak(self, text: str) -> None:
-        audio, sr = await asyncio.to_thread(tts.synthesize, text)
-        sd.play(audio, samplerate=sr)
-        sd.wait()
+        if self._stream is not None:
+            self._stream.stop()
+        try:
+            audio, sr = await asyncio.to_thread(tts.synthesize, text)
+            sd.play(audio, samplerate=sr)
+            sd.wait()
+        finally:
+            if self._stream is not None and self._running:
+                self._stream.start()
 
     async def stop(self) -> None:
         self._running = False

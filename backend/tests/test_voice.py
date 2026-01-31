@@ -60,16 +60,17 @@ class TestSTT:
         with pytest.raises(RuntimeError, match="not loaded"):
             engine.transcribe(np.zeros(16000, dtype=np.float32))
 
-    def test_transcribe_with_mock_pipeline(self):
+    def test_transcribe_with_mock_model(self):
         from src.voice.stt import SpeechToText
 
         engine = SpeechToText()
-        mock_pipeline = MagicMock()
-        mock_pipeline.return_value = {"text": "  hello world  "}
-        engine._pipeline = mock_pipeline
+        mock_model = MagicMock()
+        mock_model.generate.return_value = {"text": "  hello world  "}
+        engine._model = mock_model
 
         result = engine.transcribe(np.zeros(16000, dtype=np.float32))
         assert result == "hello world"
+        mock_model.generate.assert_called_once()
 
 
 class TestTTS:
