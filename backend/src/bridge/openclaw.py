@@ -29,6 +29,12 @@ class OpenClawClient:
         self._listener_task: asyncio.Task | None = None
         self.on_delta: DeltaCallback | None = None
         self.on_done: DoneCallback | None = None
+        self._session_key = f"hugo-{uuid.uuid4()}"
+
+    def reset_session(self) -> None:
+        """Rotate the session key to start a fresh conversation context."""
+        self._session_key = f"hugo-{uuid.uuid4()}"
+        logger.info("Session reset — new key: %s", self._session_key)
 
     async def connect(self) -> None:
         """Connect to the OpenClaw gateway via WebSocket."""
@@ -138,7 +144,7 @@ class OpenClawClient:
             "id": req_id,
             "method": "chat.send",
             "params": {
-                "sessionKey": "hugo",
+                "sessionKey": self._session_key,
                 "message": message,
                 "idempotencyKey": str(uuid.uuid4()),
             },
@@ -176,7 +182,7 @@ class OpenClawClient:
             "id": req_id,
             "method": "chat.send",
             "params": {
-                "sessionKey": "hugo",
+                "sessionKey": self._session_key,
                 "message": message,
                 "idempotencyKey": str(uuid.uuid4()),
             },
