@@ -17,31 +17,33 @@ class TextToSpeech:
     ) -> None:
         self.model_name = model_name
         self.voice = voice
-        self._pipeline: object | None = None
+        self._model: object | None = None
+        self._sample_rate: int = 24000
 
     def load(self) -> None:
-        from mlx_audio.tts import TTSPipeline
+        from mlx_audio.tts.utils import load_model
 
-        self._pipeline = TTSPipeline(model=self.model_name)
+        self._model = load_model(self.model_name)
+        self._sample_rate = getattr(self._model, "sample_rate", 24000)
         logger.info("Kokoro TTS loaded: %s (voice=%s)", self.model_name, self.voice)
 
     def synthesize(self, text: str) -> tuple[np.ndarray, int]:
         """Synthesize text to (audio_array, sample_rate)."""
-        if self._pipeline is None:
+        if self._model is None:
             raise RuntimeError("TTS model not loaded – call load() first")
 
-        result = self._pipeline(text, voice=self.voice)
+        # model.generate() yields GenerationResult objects with .audio and .sample_rate
+        chunks = []
+        for result in self._model.generate(text, voice=self.voice):
+            audio = result.audio
+            if not isinstance(audio, np.ndarray):
+                audio = np.array(audio)
+            chunks.append(audio)
 
-        if isinstance(result, tuple):
-            audio, sr = result
-        else:
-            audio = result
-            sr = 24000  # Kokoro default
+        if not chunks:
+            return np.array([], dtype=np.float32), self._sample_rate
 
-        if not isinstance(audio, np.ndarray):
-            audio = np.array(audio)
-
-        return audio, sr
+        return np.concatenate(chunks), self._sample_rate
 
 
 tts = TextToSpeech()

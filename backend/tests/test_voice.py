@@ -81,15 +81,18 @@ class TestTTS:
         with pytest.raises(RuntimeError, match="not loaded"):
             engine.synthesize("hello")
 
-    def test_synthesize_with_mock_pipeline(self):
+    def test_synthesize_with_mock_model(self):
         from src.voice.tts import TextToSpeech
 
         engine = TextToSpeech()
-        mock_pipeline = MagicMock()
-        mock_audio = np.zeros(24000, dtype=np.float32)
-        mock_pipeline.return_value = (mock_audio, 24000)
-        engine._pipeline = mock_pipeline
+        mock_model = MagicMock()
+        mock_result = MagicMock()
+        mock_result.audio = np.zeros(24000, dtype=np.float32)
+        mock_model.generate.return_value = [mock_result]
+        engine._model = mock_model
+        engine._sample_rate = 24000
 
         audio, sr = engine.synthesize("hello")
         assert sr == 24000
         assert len(audio) == 24000
+        mock_model.generate.assert_called_once()
