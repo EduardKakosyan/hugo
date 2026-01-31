@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     port: int = 8080
     backend_url: str = "http://localhost:8080"
 
+    # Vision
+    vision_provider: str = "gemini"
+    mlx_vision_model: str = "mlx-community/Qwen3-VL-4B-Instruct-8bit"
+
     # Camera
     camera_index: int = 0
 
