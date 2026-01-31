@@ -56,6 +56,7 @@ class TestGeminiVision:
         from src.vision.gemini import GeminiVision
 
         mock_settings.gemini_api_key = ""
+        mock_camera.capture_jpeg.return_value = b"\xff\xd8fake"
         vision = GeminiVision()
 
         with pytest.raises(RuntimeError, match="HUGO_GEMINI_API_KEY"):

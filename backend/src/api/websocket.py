@@ -98,6 +98,10 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 await voice_pipeline.stop()
                 await broadcast("voice:status", {"active": False})
 
+            elif msg_type == "session:reset":
+                openclaw_client.reset_session()
+                await broadcast("session:reset", {})
+
     except WebSocketDisconnect:
         pass
     except asyncio.CancelledError:
