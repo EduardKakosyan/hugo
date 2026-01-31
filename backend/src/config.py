@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     backend_url: str = "http://localhost:8080"
 
     # Vision
-    vision_provider: str = "gemini"
+    vision_provider: str = "mlx"
     mlx_vision_model: str = "mlx-community/Qwen3-VL-4B-Instruct-8bit"
 
     # Camera
