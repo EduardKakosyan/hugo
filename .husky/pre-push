@@ -24,7 +24,7 @@ echo ""
 # --container-architecture linux/amd64 ensures compatibility on Apple Silicon
 # -j validate runs only the validate job
 # --secret-file .secrets passes local secrets (if exists)
-ACT_ARGS="-j validate --container-architecture linux/amd64 --env ACT=true"
+ACT_ARGS="-j secrets --container-architecture linux/amd64 --env ACT=true"
 
 # Add secrets file if it exists
 if [ -f ".secrets" ]; then
