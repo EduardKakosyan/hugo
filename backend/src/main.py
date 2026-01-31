@@ -39,6 +39,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     await voice_pipeline.stop()
     await openclaw_client.close()
+
+    from src.vision.camera import camera
+    camera.close()
+
     logger.info("HUGO backend stopped")
 
 

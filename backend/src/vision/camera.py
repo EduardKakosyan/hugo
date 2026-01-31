@@ -1,6 +1,7 @@
 """OpenCV camera capture – returns numpy frames and JPEG bytes."""
 
 import logging
+import time
 
 import cv2
 import numpy as np
@@ -19,6 +20,10 @@ class Camera:
         self._cap = cv2.VideoCapture(self.index)
         if not self._cap.isOpened():
             raise RuntimeError(f"Cannot open camera {self.index}")
+        # macOS cameras need warmup frames before reads succeed
+        for _ in range(5):
+            self._cap.read()
+            time.sleep(0.1)
         logger.info("Camera %d opened", self.index)
 
     def capture_frame(self) -> np.ndarray:
