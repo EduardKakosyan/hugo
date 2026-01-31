@@ -7,6 +7,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from src.bridge.openclaw import openclaw_client
+from src.vision import set_active_provider
 from src.voice.pipeline import voice_pipeline
 
 logger = logging.getLogger("hugo.api.ws")
@@ -101,6 +102,19 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             elif msg_type == "session:reset":
                 openclaw_client.reset_session()
                 await broadcast("session:reset", {})
+
+            elif msg_type == "vision:set-provider":
+                provider_name = msg.get("data", "")
+                try:
+                    set_active_provider(provider_name)
+                    await broadcast("vision:provider", {"provider": provider_name})
+                except ValueError as e:
+                    await ws.send_text(
+                        json.dumps({
+                            "type": "vision:error",
+                            "data": json.dumps({"error": str(e)}),
+                        })
+                    )
 
     except WebSocketDisconnect:
         pass
