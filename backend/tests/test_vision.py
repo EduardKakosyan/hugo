@@ -1,4 +1,4 @@
-"""Tests for vision modules (camera, Gemini)."""
+"""Tests for vision modules (camera, Gemini, MLX, provider factory)."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -81,3 +81,69 @@ class TestGeminiVision:
         vision = GeminiVision()
         result = await vision.analyze("What do you see?")
         assert result == "I see a room"
+
+
+class TestMLXVision:
+    @patch("src.vision.mlx_vision.camera")
+    async def test_analyze_success(self, mock_camera):
+        from src.vision.mlx_vision import MLXVision
+
+        mock_camera.capture_jpeg.return_value = b"\xff\xd8fake"
+
+        vision = MLXVision()
+        vision._run_inference = MagicMock(return_value="I see a desk")
+
+        result = await vision.analyze("What do you see?")
+
+        assert result == "I see a desk"
+        vision._run_inference.assert_called_once()
+        args = vision._run_inference.call_args[0]
+        assert args[0] == "What do you see?"
+
+    @patch("src.vision.mlx_vision.camera")
+    async def test_analyze_model_load_failure(self, mock_camera):
+        from src.vision.mlx_vision import MLXVision
+
+        mock_camera.capture_jpeg.return_value = b"\xff\xd8fake"
+
+        vision = MLXVision()
+        vision._run_inference = MagicMock(side_effect=RuntimeError("Model not found"))
+
+        with pytest.raises(RuntimeError, match="Model not found"):
+            await vision.analyze("test")
+
+
+class TestProviderFactory:
+    def test_set_and_get_provider_gemini(self):
+        from src.vision import get_active_provider_name, set_active_provider
+
+        set_active_provider("gemini")
+        assert get_active_provider_name() == "gemini"
+
+    def test_set_and_get_provider_mlx(self):
+        from src.vision import get_active_provider_name, set_active_provider
+
+        set_active_provider("mlx")
+        assert get_active_provider_name() == "mlx"
+
+    def test_set_invalid_provider(self):
+        from src.vision import set_active_provider
+
+        with pytest.raises(ValueError, match="Unknown vision provider"):
+            set_active_provider("invalid")
+
+    def test_get_provider_returns_gemini(self):
+        from src.vision import get_provider, set_active_provider
+        from src.vision.gemini import GeminiVision
+
+        set_active_provider("gemini")
+        provider = get_provider()
+        assert isinstance(provider, GeminiVision)
+
+    def test_get_provider_returns_mlx(self):
+        from src.vision import get_provider, set_active_provider
+        from src.vision.mlx_vision import MLXVision
+
+        set_active_provider("mlx")
+        provider = get_provider()
+        assert isinstance(provider, MLXVision)
