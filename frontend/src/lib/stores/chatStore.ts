@@ -4,6 +4,7 @@ import type { ChatMessage, WSMessage } from '$lib/types';
 export const messages = writable<ChatMessage[]>([]);
 export const isLoading = writable(false);
 export const wsConnected = writable(false);
+export const voiceTranscripts = writable<string[]>([]);
 
 let nextId = 0;
 let ws: WebSocket | null = null;
@@ -60,6 +61,14 @@ function handleWsMessage(event: MessageEvent): void {
 		case 'chat:error': {
 			addMessage('assistant', `Error: ${data.error}`);
 			isLoading.set(false);
+			break;
+		}
+		case 'voice:transcript': {
+			voiceTranscripts.update((t) => [...t, `You: ${data.text}`]);
+			break;
+		}
+		case 'voice:response': {
+			voiceTranscripts.update((t) => [...t, `Hugo: ${data.text}`]);
 			break;
 		}
 		case 'pong':
