@@ -25,7 +25,7 @@ class SpeechToText:
         if self._model is None:
             raise RuntimeError("STT model not loaded – call load() first")
 
-        result = self._model.generate(audio, verbose=False)
+        result = self._model.generate(audio=audio)
 
         if isinstance(result, dict):
             return result.get("text", "").strip()
