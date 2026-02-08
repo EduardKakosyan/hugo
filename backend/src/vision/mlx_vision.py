@@ -1,55 +1,81 @@
-"""MLX vision provider – local VLM analysis using mlx-vlm."""
+"""MLX vision provider – calls a local OpenAI-compatible server (LM Studio / Ollama)."""
 
-import asyncio
+import base64
 import logging
-import os
-import tempfile
+
+import cv2
+import httpx
+import numpy as np
 
 from src.config import settings
 from src.vision.camera import camera
 
 logger = logging.getLogger("hugo.vision.mlx")
 
+_MAX_IMAGE_DIM = 512
+
+
+def _downscale_jpeg(jpeg_bytes: bytes, max_dim: int = _MAX_IMAGE_DIM) -> bytes:
+    """Decode JPEG, downscale so the longest side <= max_dim, re-encode."""
+    arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        return jpeg_bytes
+    h, w = img.shape[:2]
+    if max(h, w) <= max_dim:
+        return jpeg_bytes
+    scale = max_dim / max(h, w)
+    img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    if not ok:
+        return jpeg_bytes
+    return buf.tobytes()
+
 
 class MLXVision:
     def __init__(self) -> None:
-        self._model: object | None = None
-        self._processor: object | None = None
-        self._config: object | None = None
+        self._client: httpx.AsyncClient | None = None
 
-    def _ensure_model(self) -> None:
-        if self._model is None:
-            from mlx_vlm import load
-            from mlx_vlm.utils import load_config
-
-            model_name = settings.mlx_vision_model
-            logger.info("Loading MLX vision model: %s", model_name)
-            self._model, self._processor = load(model_name)
-            self._config = load_config(model_name)
-            logger.info("MLX vision model loaded: %s", model_name)
-
-    def _run_inference(self, query: str, image_path: str) -> str:
-        from mlx_vlm import generate
-        from mlx_vlm.prompt_utils import apply_chat_template
-
-        self._ensure_model()
-        prompt = apply_chat_template(self._processor, self._config, query, num_images=1)
-        output = generate(self._model, self._processor, prompt, [image_path], verbose=False)
-        return output
+    def _ensure_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                base_url=settings.mlx_vision_base_url,
+                timeout=60.0,
+            )
+        return self._client
 
     async def analyze(self, query: str = "Describe what you see in detail.") -> str:
-        """Capture a frame and analyze with local MLX VLM."""
+        """Capture a frame and analyze via local vision model server."""
         jpeg_bytes = camera.capture_jpeg()
+        jpeg_bytes = _downscale_jpeg(jpeg_bytes)
+        b64_image = base64.b64encode(jpeg_bytes).decode("ascii")
 
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
-            f.write(jpeg_bytes)
-            tmp_path = f.name
-
-        try:
-            text = await asyncio.to_thread(self._run_inference, query, tmp_path)
-        finally:
-            os.unlink(tmp_path)
-
+        client = self._ensure_client()
+        resp = await client.post(
+            "/chat/completions",
+            json={
+                "model": settings.mlx_vision_model,
+                "max_tokens": settings.mlx_vision_max_tokens,
+                "temperature": 0.0,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{b64_image}",
+                                },
+                            },
+                            {"type": "text", "text": query},
+                        ],
+                    }
+                ],
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        text = data["choices"][0]["message"]["content"]
         logger.info("MLX analysis: %s", text[:200])
         return text
 

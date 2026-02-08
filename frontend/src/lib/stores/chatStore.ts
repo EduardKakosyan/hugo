@@ -1,11 +1,12 @@
 import { writable, get } from 'svelte/store';
-import type { ChatMessage, WSMessage } from '$lib/types';
+import type { ChatMessage, Modality, WSMessage } from '$lib/types';
 import { visionProvider } from '$lib/stores/settingsStore';
 
 export const messages = writable<ChatMessage[]>([]);
 export const isLoading = writable(false);
 export const wsConnected = writable(false);
 export const voiceActive = writable(false);
+export const activeModality = writable<Modality>('text');
 
 let nextId = 0;
 let ws: WebSocket | null = null;
@@ -81,6 +82,7 @@ function handleWsMessage(event: MessageEvent): void {
 		}
 		case 'voice:transcript': {
 			addMessage('user', data.text, false, 'voice');
+			activeModality.set('voice');
 			break;
 		}
 		case 'voice:response': {
@@ -89,10 +91,18 @@ function handleWsMessage(event: MessageEvent): void {
 		}
 		case 'voice:status': {
 			voiceActive.set(data.active);
+			if (!data.active) {
+				activeModality.set('text');
+			}
 			break;
 		}
 		case 'vision:provider': {
 			visionProvider.set(data.provider);
+			break;
+		}
+		case 'voice:error': {
+			addMessage('assistant', `Voice error: ${data.error}`);
+			voiceActive.set(false);
 			break;
 		}
 		case 'vision:error':
