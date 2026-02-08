@@ -72,7 +72,18 @@ async def camera_resume():
 async def status() -> StatusResponse:
     return StatusResponse(
         status="ok",
-        voice="ok" if voice_pipeline._models_loaded else "not_loaded",
+        voice="ok" if voice_pipeline._running else "not_loaded",
         vision="configured" if gemini_vision._client is not None else "not_configured",
         openclaw="unknown",
     )
+
+
+@router.get("/debug/voice")
+async def debug_voice():
+    """Debug endpoint for voice pipeline state."""
+    return {
+        "running": voice_pipeline._running,
+        "stream_active": voice_pipeline._stream is not None and voice_pipeline._stream.active,
+        "models_loaded": voice_pipeline._models_loaded,
+        "gemini_client": voice_pipeline._gemini_client is not None,
+    }

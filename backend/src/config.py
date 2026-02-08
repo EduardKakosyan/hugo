@@ -10,7 +10,7 @@ class Settings(BaseSettings):
 
     # Gemini
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.0-flash"
+    gemini_model: str = "gemini-2.5-flash"
 
     # Voice
     stt_model: str = "mlx-community/whisper-large-v3-turbo"
@@ -26,7 +26,9 @@ class Settings(BaseSettings):
 
     # Vision
     vision_provider: str = "mlx"
-    mlx_vision_model: str = "mlx-community/Qwen3-VL-4B-Instruct-8bit"
+    mlx_vision_base_url: str = "http://localhost:1234/v1"
+    mlx_vision_model: str = "qwen3-vl-4b-instruct-mlx"
+    mlx_vision_max_tokens: int = 200
 
     # Camera
     camera_index: int = 0
