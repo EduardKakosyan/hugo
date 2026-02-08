@@ -90,26 +90,46 @@ class TestMLXVision:
 
         mock_camera.capture_jpeg.return_value = b"\xff\xd8fake"
 
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {
+            "choices": [{"message": {"content": "I see a desk"}}]
+        }
+
         vision = MLXVision()
-        vision._run_inference = MagicMock(return_value="I see a desk")
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        vision._client = mock_client
 
         result = await vision.analyze("What do you see?")
 
         assert result == "I see a desk"
-        vision._run_inference.assert_called_once()
-        args = vision._run_inference.call_args[0]
-        assert args[0] == "What do you see?"
+        mock_client.post.assert_called_once()
+        call_kwargs = mock_client.post.call_args
+        body = call_kwargs.kwargs["json"] if "json" in call_kwargs.kwargs else call_kwargs[1]["json"]
+        assert body["messages"][0]["content"][1]["text"] == "What do you see?"
 
     @patch("src.vision.mlx_vision.camera")
-    async def test_analyze_model_load_failure(self, mock_camera):
+    async def test_analyze_server_error(self, mock_camera):
+        import httpx
+
         from src.vision.mlx_vision import MLXVision
 
         mock_camera.capture_jpeg.return_value = b"\xff\xd8fake"
 
-        vision = MLXVision()
-        vision._run_inference = MagicMock(side_effect=RuntimeError("Model not found"))
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "Server Error", request=MagicMock(), response=mock_response
+        )
 
-        with pytest.raises(RuntimeError, match="Model not found"):
+        vision = MLXVision()
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        vision._client = mock_client
+
+        with pytest.raises(httpx.HTTPStatusError):
             await vision.analyze("test")
 
 

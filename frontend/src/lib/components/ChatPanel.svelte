@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { tick } from 'svelte';
 	import { marked } from 'marked';
 	import DOMPurify from 'dompurify';
 	import {
@@ -19,9 +20,11 @@
 	$effect(() => {
 		// Access messages to subscribe
 		$messages;
-		if (messagesContainer) {
-			messagesContainer.scrollTop = messagesContainer.scrollHeight;
-		}
+		tick().then(() => {
+			if (messagesContainer) {
+				messagesContainer.scrollTop = messagesContainer.scrollHeight;
+			}
+		});
 	});
 
 	function renderMarkdown(content: string): string {
@@ -38,7 +41,7 @@
 	}
 </script>
 
-<div class="flex h-full flex-col rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)]">
+<div class="flex h-full min-h-0 flex-col rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)]">
 	<div class="border-b border-[var(--color-border)] px-4 py-2 flex items-center justify-between">
 		<span class="text-sm font-medium text-[var(--color-text)]">Chat</span>
 		<div class="flex gap-2">

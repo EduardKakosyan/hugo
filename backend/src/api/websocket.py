@@ -7,6 +7,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from src.bridge.openclaw import openclaw_client
+from src.events import VOICE_SPEAK, Event, bus
 from src.vision import set_active_provider
 from src.voice.pipeline import voice_pipeline
 
@@ -16,6 +17,9 @@ router = APIRouter(tags=["websocket"])
 
 # Connected clients
 _clients: set[WebSocket] = set()
+
+# Track request IDs that originated from voice transcripts
+_voice_requests: set[str] = set()
 
 
 async def broadcast(msg_type: str, data: dict | str) -> None:
@@ -41,6 +45,16 @@ async def _broadcast_done(req_id: str, full_text: str) -> None:
     """Called by OpenClaw client when the response is complete."""
     await broadcast("chat:done", {"reqId": req_id, "text": full_text})
 
+    # If this response originated from a voice transcript, speak it aloud
+    if req_id in _voice_requests:
+        _voice_requests.discard(req_id)
+        await broadcast("voice:response", {"text": full_text})
+        await bus.emit(Event(
+            type=VOICE_SPEAK,
+            data={"text": full_text},
+            source="openclaw",
+        ))
+
 
 def _register_callbacks() -> None:
     """Wire OpenClaw streaming callbacks to frontend broadcast."""
@@ -57,6 +71,12 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     await ws.accept()
     _clients.add(ws)
     logger.info("WebSocket client connected (%d total)", len(_clients))
+
+    # Notify new client of current voice pipeline state
+    if voice_pipeline._running:
+        await ws.send_text(
+            json.dumps({"type": "voice:status", "data": json.dumps({"active": True})})
+        )
     try:
         while True:
             data = await ws.receive_text()
