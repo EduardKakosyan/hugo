@@ -31,7 +31,7 @@ def _get_controller() -> ReachyController:
     return _controller
 
 
-def load_vlm(model_path: str = "Qwen/Qwen2.5-VL-7B-Instruct-4bit") -> None:
+def load_vlm(model_path: str = "Qwen/Qwen3-VL-4B-Instruct-4bit") -> None:
     """Load the Vision Language Model via MLX (lazy, called once)."""
     global _vlm_model, _vlm_processor
     if _vlm_model is not None:

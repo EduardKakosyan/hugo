@@ -12,10 +12,10 @@ HUGO is a **voice-first personal assistant** embodied in a **Reachy Mini robot**
 - **Agent Framework**: CrewAI (agents.yaml + tasks.yaml config)
 - **Voice Pipeline**: Pipecat + Silero VAD + Whisper V3 Turbo + Kokoro TTS (all MLX)
 - **LLM (local)**: Qwen3-32B via MLX-LM
-- **Vision (local)**: Qwen2.5-VL 7B via MLX-VLM
+- **Vision (local)**: Qwen3-VL 4B via MLX-VLM
 - **Routing**: semantic-router with nomic-embed-text V2
 - **MCP Servers**: FastMCP (ms_graph, linear, fireflies)
-- **Robot SDK**: reachy2-sdk
+- **Robot SDK**: reachy-mini
 - **Package Manager**: uv (NOT pip, NOT poetry)
 - **Linting**: ruff
 - **Type Checking**: mypy (strict)
