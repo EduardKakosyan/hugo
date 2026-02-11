@@ -1,19 +1,30 @@
 # Files to exclude when act copies the workspace
-# Similar to .dockerignore
 
-# Dependencies (will be installed fresh in container)
+# Dependencies
 node_modules/
 .pnpm-store/
+.venv/
+venv/
 
 # Git
 .git/
 
 # Build outputs
-.next/
-out/
 build/
 dist/
 coverage/
+htmlcov/
+
+# Python cache
+__pycache__/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# MLX models (large files)
+models/
+*.safetensors
+*.gguf
 
 # IDE
 .idea/
@@ -27,3 +38,7 @@ coverage/
 
 # Logs
 *.log
+
+# Knowledge store
+knowledge/*.db
+knowledge/*.index
