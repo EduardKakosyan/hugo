@@ -1,4 +1,4 @@
-title = "Gitleaks Configuration for Venture Template"
+title = "Gitleaks Configuration for HUGO"
 
 [extend]
 useDefault = true
@@ -6,21 +6,21 @@ useDefault = true
 [allowlist]
 description = "Allowlist for false positives and test data"
 
-# Common Next.js/Vercel/Supabase paths to exclude
+# Paths to exclude
 paths = [
   '''\.env\.example$''',
   '''\.env\.local\.example$''',
   '''\.secrets\.example$''',
   '''node_modules/''',
-  '''\.next/''',
-  '''\.vercel/''',
+  '''\.venv/''',
+  '''venv/''',
   '''pnpm-lock\.yaml$''',
-  '''public/''',
-  '''\.test\.(js|ts|tsx)$''',
-  '''\.spec\.(js|ts|tsx)$''',
-  '''^__tests__/''',
-  '''^tests?/fixtures/''',
-  '''^docs?/'''
+  '''uv\.lock$''',
+  '''\.test\.py$''',
+  '''test_.*\.py$''',
+  '''^tests?/''',
+  '''^docs?/''',
+  '''knowledge/'''
 ]
 
 # Common test/example patterns
@@ -36,22 +36,32 @@ regexes = [
   '''X{10,}'''
 ]
 
-# Custom Supabase detection
+# Custom Azure detection
 [[rules]]
-id = "supabase-service-key"
-description = "Supabase Service Role Key (CRITICAL - never commit!)"
-regex = '''eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6.*"role":"service_role"'''
-tags = ["supabase", "service-key", "critical"]
-
-[[rules]]
-id = "vercel-token"
-description = "Vercel API Token"
-regex = '''(?i)vercel[_-]?(token|api)["\']?\s*[:=]\s*["\']?([a-z0-9]{24,})'''
-tags = ["vercel", "token"]
-
-[[rules]]
-id = "nextauth-secret"
-description = "NextAuth Secret"
-regex = '''NEXTAUTH_SECRET\s*=\s*["\']?[a-z0-9+/=]{32,}["\']?'''
-tags = ["nextauth", "secret"]
+id = "azure-client-secret"
+description = "Azure Client Secret"
+regex = '''AZURE_CLIENT_SECRET\s*=\s*["\']?[a-zA-Z0-9~._-]{34,}["\']?'''
+tags = ["azure", "secret"]
 entropy = 4.0
+
+# Linear API key
+[[rules]]
+id = "linear-api-key"
+description = "Linear API Key"
+regex = '''lin_api_[a-zA-Z0-9]{30,}'''
+tags = ["linear", "api-key"]
+
+# Fireflies API key
+[[rules]]
+id = "fireflies-api-key"
+description = "Fireflies API Key"
+regex = '''FIREFLIES_API_KEY\s*=\s*["\']?[a-zA-Z0-9]{20,}["\']?'''
+tags = ["fireflies", "api-key"]
+entropy = 3.5
+
+# Anthropic API key
+[[rules]]
+id = "anthropic-api-key"
+description = "Anthropic API Key"
+regex = '''sk-ant-[a-zA-Z0-9-]{80,}'''
+tags = ["anthropic", "api-key"]

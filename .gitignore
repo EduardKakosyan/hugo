@@ -1,22 +1,3 @@
-# Dependencies
-node_modules/
-.pnpm-store/
-
-# Build
-build/
-dist/
-.svelte-kit/
-.next/
-out/
-
-# Testing
-coverage/
-*.coverage
-.nyc_output/
-junit.xml
-.pytest_cache/
-htmlcov/
-
 # Python
 __pycache__/
 *.py[cod]
@@ -25,14 +6,37 @@ __pycache__/
 *.egg
 .mypy_cache/
 .ruff_cache/
+.pytest_cache/
+htmlcov/
+*.coverage
+.coverage
 venv/
 .venv/
+
+# UV
+uv.lock
+
+# Dependencies (Node - for commitlint/husky)
+node_modules/
+.pnpm-store/
+pnpm-lock.yaml
 
 # Local env files
 .env
 .env.local
 .env.*.local
 .secrets
+
+# MLX model cache
+models/
+*.gguf
+*.safetensors
+*.bin
+
+# Audio
+*.wav
+*.mp3
+*.ogg
 
 # OS files
 .DS_Store
@@ -44,10 +48,18 @@ Thumbs.db
 *.swp
 *.swo
 
+# Build
+build/
+dist/
+*.tsbuildinfo
+
 # Misc
 *.log
 *.tmp
 *.temp
 .cache/
-*.tsbuildinfo
 *.tgz
+
+# Knowledge store (may contain sensitive data)
+knowledge/*.db
+knowledge/*.index
