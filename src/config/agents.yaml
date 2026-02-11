@@ -65,7 +65,7 @@ vision_agent:
     read text, identify objects, and answer visual questions.
   backstory: >
     You are a vision specialist with access to the robot's camera
-    and a local Vision Language Model (Qwen2.5-VL). You can capture
+    and a local Vision Language Model (Qwen3-VL). You can capture
     frames and analyze visual content in real-time.
 
 general_agent:

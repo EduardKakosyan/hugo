@@ -18,7 +18,7 @@ from src.tools.vision_tools import CaptureFrameTool, DescribeSceneTool
 
 LOCAL_LLM = os.getenv("HUGO_LOCAL_LLM", "openai/qwen3-32b")
 CLOUD_LLM = os.getenv("HUGO_CLOUD_LLM", "gemini/gemini-2.5-flash")
-VISION_LLM = os.getenv("HUGO_VISION_LLM", "openai/qwen2.5-vl-7b")
+VISION_LLM = os.getenv("HUGO_VISION_LLM", "openai/qwen3-vl-4b")
 
 # MCP server commands for CrewAI agent integration
 MS_GRAPH_MCP = "python -m src.mcp_servers.ms_graph"
