@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 
@@ -15,7 +14,7 @@ import (
 )
 
 func main() {
-	_ = godotenv.Load()
+	_ = godotenv.Load(".env.local")
 
 	cfg, err := agent.LoadConfig()
 	if err != nil {
@@ -23,7 +22,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	r := agent.CreateAgent(cfg)
+	r := agent.NewRunner(cfg)
 	ctx := context.Background()
 	scanner := bufio.NewScanner(os.Stdin)
 
@@ -46,7 +45,8 @@ func main() {
 			model.NewUserMessage(input),
 		)
 		if err != nil {
-			log.Fatal(err)
+			fmt.Print(err)
+			continue
 		}
 
 		for event := range events {

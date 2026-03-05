@@ -6,11 +6,12 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model/openai"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
+	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
-func CreateAgent(cfg Config) runner.Runner {
+func NewRunner(cfg Config) runner.Runner {
 	mdl := openai.New(cfg.ModelName,
-		openai.WithAPIKey(cfg.APIKEY),
+		openai.WithAPIKey(cfg.APIKey),
 		openai.WithBaseURL("https://api.anthropic.com/v1"),
 		openai.WithVariant("anthropic"),
 	)
@@ -19,8 +20,14 @@ func CreateAgent(cfg Config) runner.Runner {
 		Stream: true,
 	}
 
+	tools := []tool.Tool{
+		NewCalcTool(),
+		NewTimeTool(),
+	}
+
 	agent := llmagent.New("hugo",
 		llmagent.WithModel(mdl),
+		llmagent.WithTools(tools),
 		llmagent.WithInstruction("You are HUGO..."),
 		llmagent.WithGenerationConfig(genConfig),
 	)
