@@ -2,13 +2,16 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 
 	"hugo/internal/agent"
 
 	"github.com/joho/godotenv"
+	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
 func main() {
@@ -20,6 +23,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	r := agent.CreateAgent(cfg)
+	ctx := context.Background()
 	scanner := bufio.NewScanner(os.Stdin)
 
 	for {
@@ -34,8 +39,22 @@ func main() {
 		if input == "" {
 			continue
 		}
+		events, err := r.Run(
+			ctx,
+			"user-001",
+			"session-001",
+			model.NewUserMessage(input),
+		)
+		if err != nil {
+			log.Fatal(err)
+		}
 
-		fmt.Println(input)
-		fmt.Println(cfg.APIKEY)
+		for event := range events {
+			if event.Object == "chat.completion.chunk" {
+				fmt.Print(event.Choices[0].Delta.Content)
+			}
+		}
+
+		fmt.Println()
 	}
 }
