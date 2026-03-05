@@ -7,7 +7,7 @@ import (
 
 type Config struct {
 	ModelName string
-	APIKEY    string
+	APIKey    string
 	MaxTokens int
 }
 
@@ -15,7 +15,7 @@ type Config struct {
 func NewDefaultConfig() Config {
 	return Config{
 		ModelName: "claude-sonnet-4-20250514",
-		APIKEY:    "test-key",
+		APIKey:    "test-key",
 		MaxTokens: 2000,
 	}
 }
@@ -28,7 +28,7 @@ func LoadConfig() (Config, error) {
 
 	return Config{
 		ModelName: "claude-sonnet-4-20250514",
-		APIKEY:    key,
+		APIKey:    key,
 		MaxTokens: 2000,
 	}, nil
 }

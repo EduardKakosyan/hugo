@@ -1,6 +1,6 @@
 # Learning Go Through HUGO — Step-by-Step Guide
 
-This guide walks you through Go from zero, building toward Phase 1 of HUGO.
+This guide walks you through Go from zero while building HUGO.
 Each step introduces one concept, explains it, then asks you to write code.
 Do not copy-paste — type every line yourself.
 
@@ -610,12 +610,442 @@ By the end of these 8 steps, you've used:
 
 ---
 
+---
+---
+
+# Phase 2: Adding Tools
+
+Phase 1 gave you a chatting agent. Phase 2 gives it **capabilities** — tools
+the agent can call to do real work. This is what separates a chatbot from an agent.
+
+New Go concepts in this phase:
+- **Generics** — type parameters like `[I, O any]`
+- **JSON struct tags** — `json:"field_name"` and `jsonschema:"description=..."`
+- **Slices** — `[]tool.Tool` — Go's dynamic arrays
+- **The `time` package** — standard library time handling
+
+**Book:** Chapter 8 (Generics), Chapter 12 (JSON — The Encoding Ecosystem)
+
+---
+
+## Step 9: Understanding Generics and Struct Tags
+
+**Goal:** Learn the two Go features that make function tools work.
+
+### Generics
+
+Go 1.18 added generics. A generic function has **type parameters** in square brackets:
+
+```go
+func Print[T any](val T) {
+    fmt.Println(val)
+}
+
+Print[string]("hello")   // T = string
+Print[int](42)            // T = int
+Print("hello")            // Go can infer T = string, brackets optional
+```
+
+`any` is a **type constraint** — it means "any type at all." You can also write
+more restrictive constraints, but `any` is what tRPC-agent-go uses for tools.
+
+`NewFunctionTool` is generic over two types:
+```go
+func NewFunctionTool[I, O any](
+    fn func(context.Context, I) (O, error),
+    opts ...Option,
+) *FunctionTool[I, O]
+```
+
+- `I` = the input struct (what the LLM sends as tool arguments)
+- `O` = the output struct (what the tool returns to the LLM)
+- The framework auto-generates JSON schemas from `I` and `O` using reflection
+
+You define the structs, write the function, and the framework handles
+serialization/deserialization automatically.
+
+### Struct Tags
+
+Go struct fields can have **tags** — metadata strings that libraries read at runtime:
+
+```go
+type WeatherArgs struct {
+    City    string `json:"city" jsonschema:"description=City name,required"`
+    Unit    string `json:"unit" jsonschema:"description=Temperature unit,enum=celsius,enum=fahrenheit"`
+}
+```
+
+Two tag systems are in play:
+- **`json:"city"`** — tells `encoding/json` to use `"city"` as the JSON key
+  (instead of `"City"`). This is what the LLM sees and produces.
+- **`jsonschema:"description=...,required"`** — tells tRPC-agent-go's schema
+  generator to add a description and mark the field as required in the JSON schema
+  sent to the LLM.
+
+Without the `json` tag, Go uses the field name as-is (`City`). The LLM would
+need to produce `{"City": "Tokyo"}` instead of `{"city": "tokyo"}`. Convention
+is lowercase JSON keys.
+
+### Slices
+
+A **slice** is Go's dynamic array. You'll use one to pass tools to the agent:
+
+```go
+// Slice literal
+tools := []tool.Tool{timeTool, weatherTool}
+
+// Append to a slice
+tools = append(tools, anotherTool)
+
+// Iterate a slice
+for i, t := range tools {
+    fmt.Printf("Tool %d: %s\n", i, t.Declaration().Name)
+}
+```
+
+Slices are passed by reference (technically by header), so appending inside a
+function modifies the original. But for our use case, we just build the slice
+and pass it to `WithTools`.
+
+**Book:** Chapter 3 (Composite Types — slice section)
+
+---
+
+## Step 10: Your First Tool — Current Time
+
+**Goal:** Create a tool that returns the current date and time.
+
+This is the simplest possible tool — no input fields, one output field.
+Perfect for understanding the pattern.
+
+**Task:** Create `internal/agent/tools.go` and define a time tool.
+
+**What you need to write:**
+
+1. An input struct — empty, since this tool takes no arguments:
+   ```go
+   type TimeInput struct{}
+   ```
+
+2. An output struct — one field for the time string:
+   ```go
+   type TimeOutput struct {
+       CurrentTime string `json:"current_time" jsonschema:"description=Current date and time"`
+   }
+   ```
+
+3. The tool function — takes `context.Context` and input, returns output and error:
+   ```go
+   func getTime(_ context.Context, _ TimeInput) (TimeOutput, error) {
+       return TimeOutput{
+           CurrentTime: time.Now().Format(time.RFC1123),
+       }, nil
+   }
+   ```
+   Note the `_` for unused parameters — Go requires you to use every variable,
+   but `_` is the blank identifier that tells Go "I know I'm not using this."
+
+4. A function that builds and returns the tool:
+   ```go
+   func NewTimeTool() *function.FunctionTool[TimeInput, TimeOutput] {
+       return function.NewFunctionTool(
+           getTime,
+           function.WithName("current_time"),
+           function.WithDescription("Returns the current date and time"),
+       )
+   }
+   ```
+
+**Imports for this file:**
+```go
+import (
+    "context"
+    "time"
+
+    "trpc.group/trpc-go/trpc-agent-go/tool/function"
+)
+```
+
+**Checkpoint:** File compiles — run `go build ./internal/agent/` to check.
+No need to run the full program yet.
+
+---
+
+## Step 11: A Second Tool — Calculator
+
+**Goal:** Create a tool with actual input parameters the LLM must provide.
+
+**Task:** In the same `internal/agent/tools.go` file, add a calculator tool.
+
+**What you need to write:**
+
+1. Input struct — the LLM must provide these:
+   ```go
+   type CalcInput struct {
+       Operation string  `json:"operation" jsonschema:"description=Math operation to perform,required,enum=add,enum=subtract,enum=multiply,enum=divide"`
+       A         float64 `json:"a" jsonschema:"description=First number,required"`
+       B         float64 `json:"b" jsonschema:"description=Second number,required"`
+   }
+   ```
+   Notice `enum=add,enum=subtract,...` — this tells the LLM exactly which
+   operations are valid. The LLM sees this in the tool's JSON schema.
+
+2. Output struct:
+   ```go
+   type CalcOutput struct {
+       Result float64 `json:"result" jsonschema:"description=Calculation result"`
+       Error  string  `json:"error,omitempty" jsonschema:"description=Error message if operation failed"`
+   }
+   ```
+   The `omitempty` tag means: if `Error` is empty string, don't include it
+   in the JSON output at all. Keeps the response clean for the LLM.
+
+3. The tool function — this one has real logic with a `switch` statement:
+   ```go
+   func calculate(_ context.Context, args CalcInput) (CalcOutput, error) {
+       switch args.Operation {
+       case "add":
+           return CalcOutput{Result: args.A + args.B}, nil
+       case "subtract":
+           return CalcOutput{Result: args.A - args.B}, nil
+       case "multiply":
+           return CalcOutput{Result: args.A * args.B}, nil
+       case "divide":
+           if args.B == 0 {
+               return CalcOutput{Error: "division by zero"}, nil
+           }
+           return CalcOutput{Result: args.A / args.B}, nil
+       default:
+           return CalcOutput{Error: "unknown operation: " + args.Operation}, nil
+       }
+   }
+   ```
+
+   **Why return `CalcOutput{Error: ...}, nil` instead of `CalcOutput{}, error`?**
+   The second `error` return is for *system failures* (network down, panic).
+   A "division by zero" is a *tool-level result* the LLM should handle — so we
+   put it in the output struct. If you return a Go error, the framework treats it
+   as a system failure and the LLM may not see a useful message.
+
+4. The constructor:
+   ```go
+   func NewCalcTool() *function.FunctionTool[CalcInput, CalcOutput] {
+       return function.NewFunctionTool(
+           calculate,
+           function.WithName("calculator"),
+           function.WithDescription("Performs basic math: add, subtract, multiply, divide"),
+       )
+   }
+   ```
+
+**Checkpoint:** `go build ./internal/agent/` compiles clean.
+
+---
+
+## Step 12: Registering Tools with the Agent
+
+**Goal:** Wire your tools into the agent so the LLM can call them.
+
+**Task:** Modify `internal/agent/hugo.go` to accept tools.
+
+1. Import the `tool` package:
+   ```go
+   "trpc.group/trpc-go/trpc-agent-go/tool"
+   ```
+
+2. In your `NewRunner` function, build the tools and pass them to the agent:
+   ```go
+   tools := []tool.Tool{
+       NewTimeTool(),
+       NewCalcTool(),
+   }
+
+   agent := llmagent.New("hugo",
+       llmagent.WithModel(mdl),
+       llmagent.WithInstruction("You are HUGO..."),
+       llmagent.WithGenerationConfig(genConfig),
+       llmagent.WithTools(tools),
+   )
+   ```
+
+That's it. The framework handles:
+- Sending the tool schemas to the LLM in every request
+- Parsing the LLM's tool call responses
+- Calling your Go function with the deserialized input
+- Sending the output back to the LLM
+- Looping until the LLM gives a final text response
+
+**Checkpoint:** `go build ./cmd/hugo` compiles.
+
+---
+
+## Step 13: Testing Tool Calls
+
+**Goal:** Verify the agent actually uses your tools.
+
+**Task:** Run `go run ./cmd/hugo` and try these prompts:
+
+```
+You: What time is it?
+```
+The agent should call `current_time` and tell you the time.
+
+```
+You: What is 42 * 17?
+```
+The agent should call `calculator` with `{"operation": "multiply", "a": 42, "b": 17}`.
+
+```
+You: What is 100 divided by 0?
+```
+The agent should call `calculator` and handle the error gracefully.
+
+```
+You: What time is it and what is 2 + 2?
+```
+The agent might call both tools (or call them sequentially). Watch the behavior.
+
+**Observing tool calls:** Right now you can't see when the agent calls a tool
+because we only print streaming text chunks. Let's fix that.
+
+---
+
+## Step 14: Displaying Tool Calls in the CLI
+
+**Goal:** Show tool call events in the terminal so you can see the agent thinking.
+
+**Concepts:**
+- The event stream contains different event types — not just text
+- Tool call events have `ToolCalls` on the message
+- Tool result events have `Role == "tool"`
+
+**Task:** Update the event loop in `cmd/hugo/main.go` to show tool activity.
+
+Right now you have:
+```go
+for event := range events {
+    if event.Object == "chat.completion.chunk" {
+        fmt.Print(event.Choices[0].Delta.Content)
+    }
+}
+```
+
+Expand this to also check for tool calls and results. The events you care about:
+
+```go
+for event := range events {
+    if len(event.Choices) == 0 {
+        continue
+    }
+
+    choice := event.Choices[0]
+
+    // Streaming text — the agent speaking
+    if choice.Delta.Content != "" {
+        fmt.Print(choice.Delta.Content)
+    }
+
+    // Tool call — the agent decided to use a tool
+    if len(choice.Message.ToolCalls) > 0 {
+        for _, tc := range choice.Message.ToolCalls {
+            fmt.Printf("\n  [tool] %s(%s)\n", tc.Function.Name, tc.Function.Arguments)
+        }
+    }
+
+    // Tool result — a tool returned its output
+    if choice.Message.Role == "tool" {
+        fmt.Printf("  [result] %s\n", choice.Message.Content)
+    }
+}
+```
+
+**Why check both `Delta.Content` and `Message.ToolCalls`?**
+During streaming, text arrives in `Delta` (partial chunks). Tool calls and
+results arrive in `Message` (complete objects). The tRPC-agent-go event
+stream mixes both — your consumer needs to handle each type.
+
+**Checkpoint:** When you ask "what time is it?", you should see something like:
+```
+You: what time is it?
+  [tool] current_time({})
+  [result] {"current_time":"Thu, 06 Mar 2026 10:30:00 EST"}
+The current time is Thursday, March 6th, 2026 at 10:30 AM EST.
+```
+
+This is also a preview of the voice pipeline's event consumer from Section 3
+of the plan — it does the same thing but speaks instead of printing.
+
+---
+
+## Step 15: Adding a Stub Robot Tool (Optional)
+
+**Goal:** Practice the pattern by adding a mock robot tool.
+
+This previews Phase 5 without needing real hardware. The tool returns fake
+data but proves the agent can reason about robot actions.
+
+**Task:** Add a `look_at` tool to `internal/agent/tools.go`:
+
+1. Input:
+   ```go
+   type LookAtInput struct {
+       Direction string `json:"direction" jsonschema:"description=Direction to look,required,enum=left,enum=right,enum=up,enum=down,enum=center"`
+   }
+   ```
+
+2. Output:
+   ```go
+   type LookAtOutput struct {
+       Status    string `json:"status"`
+       Direction string `json:"direction"`
+   }
+   ```
+
+3. Function (stub — no real robot):
+   ```go
+   func lookAt(_ context.Context, args LookAtInput) (LookAtOutput, error) {
+       // In Phase 5 this will call robotClient.Goto()
+       return LookAtOutput{
+           Status:    "moved",
+           Direction: args.Direction,
+       }, nil
+   }
+   ```
+
+4. Register it alongside the other tools in `hugo.go`.
+
+**Test it:**
+```
+You: Look to your left
+  [tool] look_at({"direction":"left"})
+  [result] {"status":"moved","direction":"left"}
+I've turned to look to my left.
+```
+
+---
+
+## What You've Learned in Phase 2
+
+| Go Concept | Where You Used It |
+|---|---|
+| Generics (`[I, O any]`) | `NewFunctionTool[TimeInput, TimeOutput]` |
+| Struct tags (`json`, `jsonschema`) | All input/output structs |
+| Slices (`[]tool.Tool`) | Tool list passed to `WithTools` |
+| `switch` statement | Calculator operation dispatch |
+| Blank identifier (`_`) | Unused context/input params |
+| `omitempty` JSON tag | CalcOutput.Error field |
+| `time` package | `time.Now().Format(time.RFC1123)` |
+| Multiple return values | `(CalcOutput, error)` |
+
+---
+
 ## Next Steps
 
-After Phase 1 is working, you'll tackle Phase 2 (tools), which introduces:
-- **Generics** — `function.NewFunctionTool[I, O]`
-- **JSON struct tags** — `json:"field_name"`
-- **Method receivers** — attaching behavior to structs
-- **Slices** — Go's dynamic arrays
+Phase 3 (WebSocket Server) introduces:
+- **`net/http`** — Go's built-in HTTP server
+- **gorilla/websocket** — WebSocket upgrade and message handling
+- **Goroutines** — `go func() { ... }()` for concurrent connections
+- **JSON marshaling** — `json.Marshal` / `json.Unmarshal` for the WS protocol
+- **Mutexes** — protecting shared state across goroutines
 
-But first — get Phase 1 running. Take your time with each step.
+Get Phase 2 working first. Make sure you can see tool calls in the terminal.
