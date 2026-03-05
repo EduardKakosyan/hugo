@@ -50,8 +50,24 @@ func main() {
 		}
 
 		for event := range events {
-			if event.Object == "chat.completion.chunk" {
-				fmt.Print(event.Choices[0].Delta.Content)
+			if len(event.Choices) == 0 {
+				continue
+			}
+
+			choice := event.Choices[0]
+
+			if choice.Delta.Content != "" {
+				fmt.Print(choice.Delta.Content)
+			}
+
+			if len(choice.Message.ToolCalls) > 0 {
+				for _, tc := range choice.Message.ToolCalls {
+					fmt.Printf("\n [tool] %s(%s)\n", tc.Function.Name, tc.Function.Arguments)
+				}
+			}
+
+			if choice.Message.Role == "tool" {
+				fmt.Printf("  [result] %s\n", choice.Message.Content)
 			}
 		}
 
