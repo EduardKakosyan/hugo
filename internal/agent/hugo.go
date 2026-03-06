@@ -23,6 +23,7 @@ func NewRunner(cfg Config) runner.Runner {
 	tools := []tool.Tool{
 		NewCalcTool(),
 		NewTimeTool(),
+		NewLookTool(),
 	}
 
 	agent := llmagent.New("hugo",
