@@ -1,3 +1,4 @@
+// Package agent builds out all the tools for our agent
 package agent
 
 import (
@@ -9,26 +10,23 @@ import (
 
 // Types
 
-// Time Types
 type TimeInput struct{}
 
 type TimeOutput struct {
 	CurrentTime string `json:"current_time" jsonschema:"description=Current date and time"`
 }
 
-// Calculator types
 type CalcInput struct {
 	Operation string  `json:"operation" jsonschema:"description=Math operation to perform, required, enum=add, enum=subtract, enum=multiply, enum=divide"`
 	A         float64 `json:"a" jsonschema:"description=First number, required"`
-	B         float64 `json:"b" jsonschema:"secription=Second number, required"`
+	B         float64 `json:"b" jsonschema:"decription=Second number, required"`
 }
 
 type CalcOutput struct {
-	Result float64 `json:"result" jsonschema:"descriptio=Calculation Result"`
+	Result float64 `json:"result" jsonschema:"description=Calculation Result"`
 	Error  string  `json:"error,omitempty" jsonschema:"description=Error message if operation failed"`
 }
 
-// Robot tools
 type LookAtInput struct {
 	Direction string `json:"direction" jsonschema:"description=Direction to look, required, enum=left, enum=right, enum=up, enum=down, enum=center"`
 }

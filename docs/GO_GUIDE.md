@@ -1039,13 +1039,622 @@ I've turned to look to my left.
 
 ---
 
+---
+---
+
+# Phase 3: WebSocket Server
+
+Phase 2 gave you tools. Phase 3 puts them behind an HTTP server so any client
+(browser, mobile app, another service) can talk to HUGO over WebSocket.
+
+New Go concepts in this phase:
+- **`net/http`** — Go's built-in HTTP server (no framework needed)
+- **gorilla/websocket** — WebSocket upgrade and message handling
+- **Goroutines** — `go func() { ... }()` for handling concurrent connections
+- **`encoding/json`** — `json.Marshal` / `json.Unmarshal`
+- **Pointers** — `*Conn`, `&msg` — when and why
+- **`sync.Mutex`** — protecting shared state across goroutines
+- **`defer`** — cleanup that runs when a function exits
+
+**Book:** Chapter 5 (Functions — defer section), Chapter 7 (Pointers),
+Chapter 12 (JSON), Chapter 14 (Concurrency — goroutines, mutexes)
+
+---
+
+## Step 16: Understanding `net/http`
+
+**Goal:** Learn how Go serves HTTP — it's simpler than you'd expect.
+
+Go's standard library includes a production-grade HTTP server. No Express,
+no Flask, no framework. Just `net/http`.
+
+**Core idea:** An HTTP server maps URL patterns to **handler functions**.
+A handler function has this signature:
+
+```go
+func(w http.ResponseWriter, r *http.Request)
+```
+
+- `w` — write your response here (status code, headers, body)
+- `r` — the incoming request (method, URL, headers, body)
+
+**Minimal server:**
+```go
+package main
+
+import (
+    "fmt"
+    "net/http"
+)
+
+func main() {
+    http.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
+        fmt.Fprintf(w, "Hello from HUGO")
+    })
+
+    fmt.Println("Listening on :8080")
+    http.ListenAndServe(":8080", nil)
+}
+```
+
+`ListenAndServe` blocks forever — it runs the server on the current goroutine.
+Every incoming request is handled on its own goroutine automatically.
+You don't need to spawn goroutines for request handling — Go does it for you.
+
+**`http.ServeMux`** is the router (pattern → handler). When you pass `nil` to
+`ListenAndServe`, it uses the global default `http.DefaultServeMux`. For
+production code, create your own:
+
+```go
+mux := http.NewServeMux()
+mux.HandleFunc("/hello", helloHandler)
+mux.HandleFunc("/ws", wsHandler)
+http.ListenAndServe(":8080", mux)
+```
+
+This is important — the default global mux is shared across your entire process.
+Using your own mux keeps things isolated.
+
+---
+
+## Step 17: Understanding WebSockets and gorilla/websocket
+
+**Goal:** Learn how WebSocket connections work in Go.
+
+### What's a WebSocket?
+
+HTTP is request-response: client asks, server answers, connection done.
+WebSocket starts as HTTP, then **upgrades** to a persistent bidirectional
+connection. Both sides can send messages at any time. Perfect for chat.
+
+### gorilla/websocket
+
+The standard Go WebSocket library. Three things to know:
+
+**1. Upgrader** — converts an HTTP request into a WebSocket connection:
+```go
+var upgrader = websocket.Upgrader{
+    CheckOrigin: func(r *http.Request) bool {
+        return true // allow all origins in dev
+    },
+}
+
+func wsHandler(w http.ResponseWriter, r *http.Request) {
+    conn, err := upgrader.Upgrade(w, r, nil)
+    if err != nil {
+        return // upgrade failed, HTTP error already sent
+    }
+    defer conn.Close()
+    // conn is now a *websocket.Conn — full duplex
+}
+```
+
+**2. Reading and writing** — one reader goroutine, one writer goroutine:
+```go
+// Reading (blocks until message arrives)
+_, msg, err := conn.ReadMessage()
+
+// Writing JSON (sends a TextMessage frame)
+conn.WriteJSON(someStruct)
+```
+
+**3. Thread safety rule:**
+- ONE goroutine may read at a time
+- ONE goroutine may write at a time
+- One reader + one writer concurrently IS safe
+- Two writers concurrently is NOT safe
+
+This means: if you want to send messages from multiple goroutines (e.g. streaming
+agent events while also sending keepalives), you must serialize writes through
+a channel. We'll do this with a `writeCh`.
+
+---
+
+## Step 18: Understanding Pointers
+
+**Goal:** Know when you're working with values vs references.
+
+You'll encounter pointers constantly in Phase 3: `*websocket.Conn`,
+`*http.Request`, `*WSMessage`.
+
+**The basics:**
+```go
+x := 42       // x is an int, value is 42
+p := &x       // p is a *int (pointer to int), holds x's memory address
+fmt.Println(*p) // 42 — *p "dereferences" the pointer, gets the value
+
+*p = 100       // changes x through the pointer
+fmt.Println(x)  // 100
+```
+
+**Why pointers matter:**
+- Go is pass-by-value. Without pointers, functions get copies of structs.
+- `conn *websocket.Conn` means you're sharing the SAME connection object,
+  not a copy. Calling `conn.WriteJSON()` writes to the real connection.
+- `&msg` means "give me a pointer to msg" — `json.Unmarshal` needs a pointer
+  so it can write into your struct.
+
+**When you see `*Type` in a function signature**, it means "I need the real
+thing, not a copy." When you see `&value`, it means "here's a pointer to this."
+
+**Book:** Chapter 6 (Pointers)
+
+---
+
+## Step 19: Define the WebSocket Message Protocol
+
+**Goal:** Design the JSON messages that flow between client and server.
+
+**Task:** Create `internal/server/messages.go` with the message types.
+
+Before writing server code, define what the wire protocol looks like. Both
+sides need to agree on message shapes.
+
+**Client → Server (incoming):**
+```go
+// ClientMessage is what the client sends us.
+type ClientMessage struct {
+    Type string `json:"type"` // "message"
+    Text string `json:"text"` // user's input text
+}
+```
+
+**Server → Client (outgoing):**
+```go
+// ServerMessage is what we send to the client.
+type ServerMessage struct {
+    Type   string `json:"type"`             // "chunk", "tool_call", "tool_result", "done", "error"
+    Text   string `json:"text,omitempty"`   // for "chunk"
+    Tool   string `json:"tool,omitempty"`   // for "tool_call", "tool_result"
+    Args   string `json:"args,omitempty"`   // for "tool_call" — raw JSON string
+    Result string `json:"result,omitempty"` // for "tool_result"
+    Error  string `json:"error,omitempty"`  // for "error"
+}
+```
+
+This maps directly to the WS protocol in the plan (Section 7, Phase 3).
+
+**Why raw `string` for Args/Result instead of `map[string]any`?**
+The tool arguments and results come from tRPC-agent-go as JSON strings already.
+Passing them as strings avoids double-encoding. The client can parse them if needed.
+
+**Imports:** Just `package server` — no imports needed for struct definitions.
+
+**Checkpoint:** `go build ./internal/server/` compiles.
+
+---
+
+## Step 20: Build the Server
+
+**Goal:** Create the HTTP server with a WebSocket endpoint.
+
+**Task:** Create `internal/server/server.go`.
+
+This file needs:
+1. A `Server` struct that holds the runner and server config
+2. A constructor `New(r runner.Runner, port string) *Server`
+3. A `Start()` method that starts listening
+4. A WebSocket handler function
+
+**What to write:**
+
+```go
+package server
+
+import (
+    "fmt"
+    "net/http"
+
+    "github.com/gorilla/websocket"
+    "trpc.group/trpc-go/trpc-agent-go/runner"
+)
+
+var upgrader = websocket.Upgrader{
+    CheckOrigin: func(r *http.Request) bool {
+        return true
+    },
+}
+
+// Server holds the HTTP server and the agent runner.
+type Server struct {
+    runner runner.Runner
+    port   string
+}
+
+// New creates a new Server.
+func New(r runner.Runner, port string) *Server {
+    return &Server{
+        runner: r,
+        port:   port,
+    }
+}
+```
+
+**`return &Server{...}`** — this returns a pointer to the struct. Why?
+- The `Server` struct is mutable (the runner processes requests)
+- If we returned `Server` (no pointer), callers would get a copy
+- With `*Server`, everyone shares the same instance
+- Convention: constructors return `*T` when the struct is used with methods
+
+Now add the `Start` method:
+
+```go
+// Start begins listening for HTTP and WebSocket connections.
+func (s *Server) Start() error {
+    mux := http.NewServeMux()
+
+    mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusOK)
+        fmt.Fprintf(w, "ok")
+    })
+
+    mux.HandleFunc("/ws", s.handleWS)
+
+    fmt.Printf("HUGO server listening on :%s\n", s.port)
+    return http.ListenAndServe(":"+s.port, mux)
+}
+```
+
+**`(s *Server)` is a method receiver** — it attaches `Start` to the `Server` type.
+Inside the method, `s` is the server instance (like `self` or `this`).
+`s.runner` accesses the runner, `s.handleWS` refers to another method on Server.
+
+**Checkpoint:** This won't compile yet — `s.handleWS` doesn't exist. That's Step 21.
+
+---
+
+## Step 21: The WebSocket Handler
+
+**Goal:** Handle a WebSocket connection — read messages, run the agent, write responses.
+
+**Task:** Add the `handleWS` method to `internal/server/server.go`.
+
+This is the core logic. For each WebSocket connection:
+1. Upgrade HTTP → WebSocket
+2. Start a write goroutine (owns all writes to the connection)
+3. Read loop: read client messages, run the agent, send events through the write channel
+
+**Concepts in play:**
+- **`defer`** — schedules cleanup code to run when the function returns,
+  no matter how it returns (normal exit, error, panic). Stack-based: last
+  defer runs first.
+- **`go func() { ... }()`** — launches a goroutine (lightweight concurrent thread).
+  The `()` at the end immediately invokes the anonymous function.
+- **Channels** — `writeCh chan ServerMessage` serializes writes to the connection.
+  The write goroutine is the only thing that calls `conn.WriteJSON`. Everyone
+  else sends to the channel.
+
+```go
+func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+    conn, err := upgrader.Upgrade(w, r, nil)
+    if err != nil {
+        return
+    }
+    defer conn.Close()
+
+    // Write channel — all outgoing messages go through here.
+    // Buffered (16) so the agent doesn't block if the client is slow.
+    writeCh := make(chan ServerMessage, 16)
+
+    // Writer goroutine — the ONLY goroutine that writes to conn.
+    go func() {
+        for msg := range writeCh {
+            if err := conn.WriteJSON(msg); err != nil {
+                return
+            }
+        }
+    }()
+
+    // Read loop — runs on this goroutine (the HTTP handler goroutine).
+    for {
+        var msg ClientMessage
+        if err := conn.ReadJSON(&msg); err != nil {
+            break // client disconnected or bad message
+        }
+
+        if msg.Type != "message" || msg.Text == "" {
+            continue
+        }
+
+        // Process the message — run the agent and stream results.
+        s.processMessage(r.Context(), msg.Text, writeCh)
+    }
+
+    close(writeCh) // signals the writer goroutine to exit
+}
+```
+
+**`conn.ReadJSON(&msg)`** — the `&` passes a pointer to `msg` so that
+`ReadJSON` can fill in the fields. Without `&`, it would get a copy and
+your `msg` variable would stay empty.
+
+**`make(chan ServerMessage, 16)`** — creates a buffered channel. Up to 16
+messages can sit in the channel before a sender blocks. This prevents the
+agent from stalling if the network is slow.
+
+**`close(writeCh)`** — closing a channel causes the `for msg := range writeCh`
+loop in the writer goroutine to exit. This is how you cleanly shut down
+the writer when the read loop ends.
+
+---
+
+## Step 22: Processing Messages (Agent Integration)
+
+**Goal:** Wire the agent runner into the WebSocket handler.
+
+**Task:** Add the `processMessage` method to `internal/server/server.go`.
+
+This is where you connect the WebSocket to the agent runner — the same
+event loop from your CLI, but writing to a channel instead of stdout.
+
+```go
+import (
+    "context"
+    "trpc.group/trpc-go/trpc-agent-go/model"
+)
+
+func (s *Server) processMessage(ctx context.Context, text string, writeCh chan<- ServerMessage) {
+    events, err := s.runner.Run(
+        ctx,
+        "user-001",     // TODO: per-connection user ID
+        "session-001",  // TODO: per-connection session ID
+        model.NewUserMessage(text),
+    )
+    if err != nil {
+        writeCh <- ServerMessage{Type: "error", Error: err.Error()}
+        return
+    }
+
+    for event := range events {
+        if len(event.Choices) == 0 {
+            continue
+        }
+
+        choice := event.Choices[0]
+
+        // Streaming text chunk
+        if choice.Delta.Content != "" {
+            writeCh <- ServerMessage{
+                Type: "chunk",
+                Text: choice.Delta.Content,
+            }
+        }
+
+        // Tool call
+        if len(choice.Message.ToolCalls) > 0 {
+            for _, tc := range choice.Message.ToolCalls {
+                writeCh <- ServerMessage{
+                    Type: "tool_call",
+                    Tool: tc.Function.Name,
+                    Args: tc.Function.Arguments,
+                }
+            }
+        }
+
+        // Tool result
+        if choice.Message.Role == "tool" {
+            writeCh <- ServerMessage{
+                Type:   "tool_result",
+                Tool:   choice.Message.Name,
+                Result: choice.Message.Content,
+            }
+        }
+    }
+
+    // Signal that the response is complete
+    writeCh <- ServerMessage{Type: "done"}
+}
+```
+
+**`chan<- ServerMessage`** — the `<-` arrow means this is a **send-only channel**.
+The function can only write to it, not read from it. This is a type-safety feature:
+it prevents `processMessage` from accidentally reading messages meant for the
+write goroutine. Compare:
+- `chan ServerMessage` — bidirectional (read and write)
+- `chan<- ServerMessage` — send only
+- `<-chan ServerMessage` — receive only
+
+You saw `<-chan` in Phase 1 with the events channel. Now you see `chan<-` for the other direction.
+
+**Book:** Chapter 12 (Concurrency — channel direction section)
+
+---
+
+## Step 23: Wire It Into main.go
+
+**Goal:** Add a `serve` subcommand to start the HTTP server.
+
+**Task:** Update `cmd/hugo/main.go` to accept a command-line argument.
+
+**Concepts:**
+- `os.Args` is a slice of command-line arguments (`os.Args[0]` is the program name)
+- We'll check if `os.Args[1]` is `"serve"` — if so, start the server instead of CLI
+
+```go
+import (
+    "hugo/internal/server"
+)
+
+func main() {
+    _ = godotenv.Load(".env.local")
+
+    cfg, err := agent.LoadConfig()
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+        os.Exit(1)
+    }
+
+    r := agent.NewRunner(cfg)
+
+    // Check for subcommand
+    if len(os.Args) > 1 && os.Args[1] == "serve" {
+        port := "8080"
+        if len(os.Args) > 2 {
+            port = os.Args[2]
+        }
+        srv := server.New(r, port)
+        if err := srv.Start(); err != nil {
+            fmt.Fprintf(os.Stderr, "Server error: %v\n", err)
+            os.Exit(1)
+        }
+        return
+    }
+
+    // Default: CLI mode (your existing chat loop)
+    ctx := context.Background()
+    scanner := bufio.NewScanner(os.Stdin)
+    // ... rest of your existing CLI loop ...
+}
+```
+
+**Don't forget to add the gorilla/websocket dependency:**
+```bash
+go get github.com/gorilla/websocket
+```
+
+**Checkpoint:** `go build ./cmd/hugo` compiles.
+
+---
+
+## Step 24: Test the WebSocket Server
+
+**Goal:** Verify the server works with a real WebSocket client.
+
+**Run the server:**
+```bash
+go run ./cmd/hugo serve
+```
+
+You should see: `HUGO server listening on :8080`
+
+**Test health endpoint:**
+```bash
+curl http://localhost:8080/health
+# Should print: ok
+```
+
+**Test WebSocket with websocat** (install: `brew install websocat`):
+```bash
+websocat ws://localhost:8080/ws
+```
+
+Then type JSON messages:
+```json
+{"type": "message", "text": "What time is it?"}
+```
+
+You should see streaming responses:
+```json
+{"type":"tool_call","tool":"current_time","args":"{}"}
+{"type":"tool_result","tool":"current_time","result":"{\"current_time\":\"...\"}"}
+{"type":"chunk","text":"The "}
+{"type":"chunk","text":"current "}
+{"type":"chunk","text":"time is..."}
+{"type":"done"}
+```
+
+**Test from a browser console:**
+```javascript
+const ws = new WebSocket("ws://localhost:8080/ws");
+ws.onmessage = (e) => console.log(JSON.parse(e.data));
+ws.onopen = () => ws.send(JSON.stringify({type: "message", text: "Hello HUGO!"}));
+```
+
+**Checkpoint:** Full conversation works over WebSocket. CLI mode still works too.
+
+---
+
+## Step 25: Add Per-Connection Sessions (Optional)
+
+**Goal:** Give each WebSocket connection its own session so conversations don't mix.
+
+Right now every connection shares `"user-001"` / `"session-001"`. If two browsers
+connect, they'd share conversation history.
+
+**Task:** Generate a unique session ID when a WebSocket connects.
+
+You'll need the `uuid` package — but Go has a simpler built-in option for this:
+
+```go
+import "crypto/rand"
+
+func generateID() string {
+    b := make([]byte, 16)
+    rand.Read(b)
+    return fmt.Sprintf("%x", b)
+}
+```
+
+Then in `handleWS`, generate the IDs at connection time and pass them to
+`processMessage`. You can store them in the `handleWS` function scope —
+they live for the duration of the WebSocket connection.
+
+```go
+func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+    // ... upgrade ...
+
+    userID := "user-" + generateID()
+    sessionID := "session-" + generateID()
+
+    // ... in the read loop:
+    s.processMessage(r.Context(), msg.Text, writeCh, userID, sessionID)
+}
+```
+
+Update `processMessage` to accept `userID` and `sessionID` parameters instead
+of hardcoded strings.
+
+---
+
+## What You've Learned in Phase 3
+
+| Go Concept | Where You Used It |
+|---|---|
+| `net/http` server | `http.NewServeMux()`, `ListenAndServe` |
+| Handler functions | `func(w http.ResponseWriter, r *http.Request)` |
+| gorilla/websocket | `Upgrader.Upgrade()`, `ReadJSON`, `WriteJSON` |
+| Goroutines | `go func() { ... }()` for the write goroutine |
+| Channels (buffered) | `make(chan ServerMessage, 16)` |
+| Channel direction | `chan<- ServerMessage` (send-only) |
+| `defer` | `defer conn.Close()` |
+| `close()` | Signaling the writer goroutine to exit |
+| Pointers | `*Server`, `&msg`, `*websocket.Conn` |
+| Method receivers | `(s *Server)` on Start, handleWS, processMessage |
+| `os.Args` | Subcommand routing |
+| `crypto/rand` | Generating connection IDs |
+| JSON marshal/unmarshal | `ReadJSON(&msg)`, `WriteJSON(msg)` |
+
+---
+
 ## Next Steps
 
-Phase 3 (WebSocket Server) introduces:
-- **`net/http`** — Go's built-in HTTP server
-- **gorilla/websocket** — WebSocket upgrade and message handling
-- **Goroutines** — `go func() { ... }()` for concurrent connections
-- **JSON marshaling** — `json.Marshal` / `json.Unmarshal` for the WS protocol
-- **Mutexes** — protecting shared state across goroutines
+Phase 4 (Voice Pipeline) introduces:
+- **`errgroup`** — managing multiple goroutines with error propagation
+- **`context.WithCancel`** — cancellable contexts for barge-in
+- **`select`** — multiplexing across multiple channels
+- **`sync.Mutex`** — protecting the speech queue
+- **CGO** — calling C libraries (for Silero VAD and whisper.cpp)
+- **`io.Pipe`** — streaming audio between goroutines
 
-Get Phase 2 working first. Make sure you can see tool calls in the terminal.
+Phase 4 is a significant step up in complexity. Make sure you're comfortable
+with goroutines, channels, and `defer` before starting it.
