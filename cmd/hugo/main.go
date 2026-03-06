@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"hugo/internal/agent"
+	"hugo/internal/server"
 
 	"github.com/joho/godotenv"
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -23,6 +24,22 @@ func main() {
 	}
 
 	r := agent.NewRunner(cfg)
+	if len(os.Args) > 1 && os.Args[1] == "serve" {
+		port := "8080"
+
+		if len(os.Args) > 2 {
+			port = os.Args[2]
+		}
+
+		srv := server.New(r, port)
+
+		if err := srv.Start(); err != nil {
+			fmt.Fprintf(os.Stderr, "Server error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	ctx := context.Background()
 	scanner := bufio.NewScanner(os.Stdin)
 

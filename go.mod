@@ -4,6 +4,8 @@ go 1.25.0
 
 require github.com/joho/godotenv v1.5.1
 
+require github.com/gorilla/websocket v1.5.3
+
 require (
 	github.com/bmatcuk/doublestar/v4 v4.9.1 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
