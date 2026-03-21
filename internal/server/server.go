@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"net/http"
 
@@ -30,6 +31,12 @@ func New(r runner.Runner, port string) *Server {
 	}
 }
 
+func generateID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return fmt.Sprintf("%x", b)
+}
+
 func (s *Server) Start() error {
 	mux := http.NewServeMux()
 
@@ -50,8 +57,10 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	defer conn.Close()
-
 	writeCh := make(chan ServerMessage, 16)
+
+	userID := "user-" + generateID()
+	sessionID := "session-" + generateID()
 
 	go func() {
 		for msg := range writeCh {
@@ -71,17 +80,17 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		s.processMessage(r.Context(), msg.Text, writeCh)
+		s.processMessage(r.Context(), msg.Text, writeCh, userID, sessionID)
 	}
 
 	close(writeCh)
 }
 
-func (s *Server) processMessage(ctx context.Context, text string, writeCh chan<- ServerMessage) {
+func (s *Server) processMessage(ctx context.Context, text string, writeCh chan<- ServerMessage, userID string, sessionID string) {
 	events, err := s.runner.Run(
 		ctx,
-		"user-001",    // TODO: per-connection user ID
-		"session-001", // TODO: per-connection session ID
+		userID,
+		sessionID,
 		model.NewUserMessage(text),
 	)
 	if err != nil {

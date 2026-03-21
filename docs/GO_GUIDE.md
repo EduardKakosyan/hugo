@@ -1646,15 +1646,1867 @@ of hardcoded strings.
 
 ---
 
+## Phase 4: Voice Pipeline (Fully Local with sherpa-onnx)
+
+Phase 3 gave you a WebSocket server. Phase 4 gives HUGO a **voice** — the
+ability to listen, speak, and give live feedback while working. This is the
+most complex phase and the heart of what makes HUGO different from a chatbot.
+
+**The key principle:** HUGO talks to you *while it works*, not after it's done.
+The agent runner and voice pipeline run on separate goroutines connected by
+channels. The agent never pauses to wait for TTS — it keeps calling tools.
+
+**Fully local:** Everything in this phase runs on your machine — no cloud
+APIs needed. We use **sherpa-onnx**, a single Go CGO package that provides
+VAD (Silero), STT (Moonshine), and TTS (Kokoro) all in one library.
+
+New Go concepts in this phase:
+- **`select`** — multiplexing across multiple channels
+- **`context.WithCancel`** — cancellable contexts for barge-in
+- **`errgroup`** — managing multiple goroutines with error propagation
+- **`sync.Mutex`** — protecting shared state across goroutines
+- **`sync/atomic`** — lightweight thread-safe flags
+- **`strings.Builder`** — efficient string buffering
+- **`encoding/binary`** — reading/writing binary audio data
+- **Maps** — `map[string]string` for configuration
+- **CGO** — Go calling C/C++ libraries (sherpa-onnx, miniaudio)
+- **Callbacks from C** — audio capture delivers data via function callbacks
+
+**Book:** Chapter 12 (Concurrency in depth), Chapter 14 (The Context),
+Chapter 13 (The Standard Library — io section)
+
+**Prerequisite:** Make sure you're comfortable with goroutines, channels,
+and `defer` from Phase 3 before starting this.
+
+---
+
+## Step 26: Pipeline Architecture Overview
+
+**Goal:** Understand the goroutine layout and data flow before writing code.
+
+### The Four Goroutines
+
+During a voice conversation, four goroutines run concurrently:
+
+```
+goroutine 1: Mic → VAD → STT → transcript channel     (always running)
+goroutine 2: runner.Run() — agent + tool execution     (per-task, cancellable)
+goroutine 3: ConsumeEvents() — reads events, enqueues speech (per-task, cancellable)
+goroutine 4: Speech queue drain → TTS → Speaker        (always running)
+```
+
+The flow:
+```
+    [Microphone]
+         │ raw audio (16kHz mono, int16 PCM)
+         ▼
+    [sherpa-onnx VAD (Silero)] ── silence → discard
+         │ speech segment ([]float32)
+         ▼
+    [sherpa-onnx STT (Moonshine)] ── "What time is it?"
+         │
+         ▼
+    transcript channel ────────────────────────────▶ main voice loop
+                                                        │
+                                                        ▼
+                                                   runner.Run()
+                                                        │
+                                                  event channel
+                                                        │
+                                                        ▼
+                                                [Event Consumer]
+                                                   │         │
+                                            text chunks   tool events
+                                                   │         │
+                                                   ▼         ▼
+                                             [Speech Queue]
+                                                   │
+                                                   ▼
+                                    [sherpa-onnx TTS (Kokoro)] → []float32
+                                                   │
+                                                   ▼
+                                          [Speaker (malgo)]
+```
+
+### One Library for Three Jobs
+
+**sherpa-onnx** (`github.com/k2-fsa/sherpa-onnx-go`) provides VAD, STT, and
+TTS in a single Go CGO package. All inference runs locally via ONNX Runtime —
+no network, no API keys, no cloud costs.
+
+| Stage | Model | Size | Output |
+|---|---|---|---|
+| VAD | Silero VAD | 2 MB | speech segments (`[]float32`) |
+| STT | Moonshine Tiny (English) | ~70 MB | text string |
+| TTS | Kokoro v0.19 (English) | ~330 MB | audio (`[]float32` at 24kHz) |
+
+### Three Types of Speakable Events
+
+The event consumer categorizes each agent event:
+
+| Event Type | What Happens | Example |
+|---|---|---|
+| Text chunk (streaming tokens) | Buffer tokens, speak at sentence boundaries | "The weather today is sunny." |
+| Tool call (agent invokes a tool) | Announce what's happening | "Let me check your calendar..." |
+| Tool result (tool returns) | Let the LLM summarize it naturally | (LLM speaks the result) |
+
+### Dependencies
+
+```bash
+go get github.com/k2-fsa/sherpa-onnx-go     # VAD + STT + TTS (all-in-one)
+go get github.com/gen2brain/malgo            # Audio capture + playback (miniaudio CGO)
+go get golang.org/x/sync                     # errgroup for goroutine management
+```
+
+After adding them:
+```bash
+go mod tidy
+```
+
+### Download Models
+
+Create a `models/` directory and download the three model sets:
+
+```bash
+mkdir -p models && cd models
+
+# 1. Silero VAD (~2 MB)
+curl -SL -O https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx
+
+# 2. Moonshine Tiny STT (~70 MB quantized, English)
+curl -SL -O https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27.tar.bz2
+tar xf sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27.tar.bz2
+
+# 3. Kokoro TTS (~330 MB, English, 11 speakers)
+curl -SL -O https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2
+tar xf kokoro-en-v0_19.tar.bz2
+
+cd ..
+```
+
+Add `models/` to `.gitignore` — these are large binary files.
+
+**CGO note:** sherpa-onnx and malgo both use CGO (Go calling C code).
+On macOS you need Xcode command line tools (`xcode-select --install`).
+On Linux you need `gcc` and `libasound2-dev` (ALSA). The sherpa-onnx Go
+package ships pre-built static libraries — you don't need to compile
+sherpa-onnx from source.
+
+---
+
+## Step 27: New Concurrency Concepts
+
+**Goal:** Learn the four concurrency primitives that make the voice pipeline work.
+
+### `select` — Multiplexing Channels
+
+`select` lets a goroutine wait on multiple channels at once. It's like a
+`switch` statement, but for channels:
+
+```go
+select {
+case msg := <-inCh:
+    // received a message from inCh
+    fmt.Println("Got:", msg)
+case outCh <- result:
+    // sent result to outCh
+case <-ctx.Done():
+    // context was cancelled
+    return
+}
+```
+
+Rules:
+- If multiple cases are ready, Go picks one at random (fair scheduling)
+- If no cases are ready, `select` blocks until one becomes ready
+- `default` case makes it non-blocking (runs immediately if nothing is ready)
+
+**Why you need it:** The event consumer must watch both the event channel
+AND the context cancellation signal. Without `select`, you can't do both.
+
+### `context.WithCancel` — Cancellation Propagation
+
+You used `context.Background()` in Phase 1. Now you'll create *derived*
+contexts that can be cancelled:
+
+```go
+// Create a cancellable context derived from a parent
+taskCtx, taskCancel := context.WithCancel(parentCtx)
+
+// Later, cancel it — signals ALL goroutines using taskCtx
+taskCancel()
+
+// Goroutines check for cancellation via ctx.Done()
+select {
+case <-taskCtx.Done():
+    fmt.Println("cancelled!")
+    return
+}
+```
+
+**Key insight:** Cancellation propagates *downward*. Cancelling a parent
+cancels all children. Cancelling a child does NOT affect the parent.
+
+```
+sessionCtx (lives for the whole session)
+    └── taskCtx (lives for one user turn)
+            ├── runner.Run(taskCtx, ...) — stops the LLM
+            ├── ConsumeEvents(taskCtx, ...) — stops reading events
+            └── HTTP calls — cancelled via taskCtx
+```
+
+**Why you need it:** Barge-in. When the user interrupts, you cancel `taskCtx`.
+This stops the runner, the event consumer, and drains the speech queue — all
+in one call.
+
+### `errgroup` — Goroutine Lifecycle Management
+
+`errgroup` from `golang.org/x/sync` manages a group of goroutines and
+collects their errors:
+
+```go
+import "golang.org/x/sync/errgroup"
+
+g, ctx := errgroup.WithContext(parentCtx)
+
+g.Go(func() error {
+    // goroutine 1
+    return doWork1(ctx)
+})
+
+g.Go(func() error {
+    // goroutine 2
+    return doWork2(ctx)
+})
+
+// Wait blocks until ALL goroutines finish.
+// Returns the FIRST error (and cancels ctx, stopping others).
+if err := g.Wait(); err != nil {
+    fmt.Println("pipeline failed:", err)
+}
+```
+
+**Key feature:** If ANY goroutine returns an error, `errgroup` cancels the
+context, which causes all other goroutines to stop. This is exactly what you
+want for a pipeline — if the microphone fails, everything should stop.
+
+**Why you need it:** The voice pipeline has 4 goroutines that must start
+together and shut down cleanly.
+
+### `sync.Mutex` — Protecting Shared State
+
+A mutex (mutual exclusion lock) ensures only one goroutine accesses shared
+data at a time:
+
+```go
+import "sync"
+
+type SpeechQueue struct {
+    mu      sync.Mutex
+    items   []string
+    stopped bool
+}
+
+func (q *SpeechQueue) Enqueue(text string) {
+    q.mu.Lock()
+    defer q.mu.Unlock()      // unlock when function returns
+    if !q.stopped {
+        q.items = append(q.items, text)
+    }
+}
+
+func (q *SpeechQueue) Drain() {
+    q.mu.Lock()
+    defer q.mu.Unlock()
+    q.items = nil
+}
+```
+
+**Rule:** Lock, do the work, unlock. Always use `defer q.mu.Unlock()` so
+you never forget to unlock (even if the function panics).
+
+**Why you need it:** The speech queue is written to by the event consumer
+goroutine and drained on barge-in from the main goroutine. Without a mutex,
+you'd get race conditions.
+
+**Book:** Chapter 12 (Concurrency — all four of these are covered in depth)
+
+---
+
+## Step 28: Define Voice Types
+
+**Goal:** Define the shared types for the voice package.
+
+**Concepts:**
+- Go convention: define interfaces where they're **consumed**, not implemented
+- Small interfaces (1-3 methods) are idiomatic Go
+- Since we're using sherpa-onnx for everything, we don't need abstract
+  VAD/STT/TTS interfaces — we wrap sherpa-onnx directly. We only define
+  the `Pipeline` interface for the orchestrator.
+
+**Task:** Create `internal/voice/types.go` with shared types.
+
+```go
+package voice
+
+import "time"
+
+// Transcript is a recognized speech segment from the user.
+type Transcript struct {
+    Text      string
+    Timestamp time.Time
+}
+```
+
+**File: `internal/voice/pipeline.go`** — the Pipeline interface:
+
+```go
+package voice
+
+import "context"
+
+// Pipeline orchestrates the full voice loop:
+//   - Input:  Mic → VAD → STT → transcript channel
+//   - Output: speech queue → TTS → speaker
+type Pipeline interface {
+    // Start begins listening. Transcripts arrive on the returned channel.
+    Start(ctx context.Context) (<-chan Transcript, error)
+
+    // Enqueue adds text to the speech queue. Non-blocking.
+    Enqueue(ctx context.Context, text string) error
+
+    // DrainQueue discards queued speech that hasn't started playing.
+    DrainQueue()
+
+    // Interrupt stops current TTS audio AND drains the queue.
+    Interrupt()
+
+    // IsSpeaking returns true if audio is playing or the queue has items.
+    IsSpeaking() bool
+
+    // Close shuts down all goroutines.
+    Close() error
+}
+```
+
+**Checkpoint:** `go build ./internal/voice/` compiles. Just types so far.
+
+---
+
+## Step 29: Build the TTS Stage with Kokoro
+
+**Goal:** Wrap sherpa-onnx's Kokoro TTS for HUGO's voice output.
+
+**Concepts:**
+- **CGO wrappers** — sherpa-onnx is C++ under the hood, Go calls it via CGO
+- **`defer` for C resource cleanup** — `DeleteOfflineTts` frees C memory
+- **`[]float32` audio** — neural TTS outputs float32 samples, not bytes
+- **Streaming callbacks** — `GenerateWithCallback` delivers audio chunks
+  during synthesis, not just at the end
+
+**Task:** Create `internal/voice/tts.go`.
+
+The sherpa-onnx Go package name is `sherpa_onnx`. We alias it as `sherpa`
+for readability:
+
+```go
+package voice
+
+import (
+    "fmt"
+    "sync"
+
+    sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
+)
+
+// TTS wraps sherpa-onnx Kokoro for text-to-speech.
+type TTS struct {
+    engine *sherpa.OfflineTts
+    mu     sync.Mutex // sherpa-onnx is not thread-safe for concurrent Generate calls
+}
+
+// TTSConfig holds paths to the Kokoro model files.
+type TTSConfig struct {
+    Model      string // path to model.onnx
+    Voices     string // path to voices.bin
+    Tokens     string // path to tokens.txt
+    DataDir    string // path to espeak-ng-data/
+    NumThreads int
+    SpeakerID  int     // which voice to use (0-10 for kokoro-en-v0_19)
+    Speed      float32 // 1.0 = normal, <1 = slower, >1 = faster
+}
+
+func NewTTS(cfg TTSConfig) (*TTS, error) {
+    config := sherpa.OfflineTtsConfig{}
+    config.Model.Kokoro.Model   = cfg.Model
+    config.Model.Kokoro.Voices  = cfg.Voices
+    config.Model.Kokoro.Tokens  = cfg.Tokens
+    config.Model.Kokoro.DataDir = cfg.DataDir
+    config.Model.Kokoro.LengthScale = 1.0
+    config.Model.NumThreads = cfg.NumThreads
+    config.Model.Provider   = "cpu"
+    config.MaxNumSentences  = 1
+
+    engine := sherpa.NewOfflineTts(&config)
+    if engine == nil {
+        return nil, fmt.Errorf("failed to create TTS engine — check model paths")
+    }
+
+    return &TTS{engine: engine}, nil
+}
+
+// SampleRate returns the output sample rate (24000 Hz for Kokoro).
+func (t *TTS) SampleRate() int {
+    return t.engine.SampleRate()
+}
+
+// Synthesize converts text to float32 audio samples.
+// Returns the full audio after synthesis completes.
+func (t *TTS) Synthesize(text string, speakerID int, speed float32) []float32 {
+    t.mu.Lock()
+    defer t.mu.Unlock()
+
+    audio := t.engine.Generate(text, speakerID, speed)
+    return audio.Samples
+}
+
+// SynthesizeWithCallback streams audio chunks during synthesis.
+// The callback receives partial []float32 samples as they're generated.
+// Return true from the callback to continue, false to abort.
+func (t *TTS) SynthesizeWithCallback(
+    text string, speakerID int, speed float32,
+    cb func(samples []float32) bool,
+) []float32 {
+    t.mu.Lock()
+    defer t.mu.Unlock()
+
+    audio := t.engine.GenerateWithCallback(text, speakerID, speed, cb)
+    return audio.Samples
+}
+
+// Close frees the underlying C resources.
+func (t *TTS) Close() {
+    sherpa.DeleteOfflineTts(t.engine)
+}
+```
+
+**Key patterns:**
+
+**`sherpa.DeleteOfflineTts(t.engine)`** — sherpa-onnx allocates memory in
+C/C++. Go's garbage collector doesn't know about it. You MUST call the
+`Delete*` function or you leak memory. This is the CGO contract: if a
+constructor returns a pointer to C memory, there's always a matching
+`Delete` function.
+
+**`sync.Mutex` on the TTS** — sherpa-onnx's `Generate` is not thread-safe.
+If the event consumer and a startup greeting both try to synthesize at the
+same time, you'd get a crash. The mutex serializes access.
+
+**`GenerateWithCallback`** — Instead of waiting for the entire utterance
+to be synthesized, the callback receives audio chunks as the model produces
+them. This lets you start playing audio before synthesis finishes —
+critical for low latency. The callback returns `true` to continue or
+`false` to abort (used during barge-in).
+
+**Audio format:** Kokoro outputs `[]float32` samples normalized to [-1, 1]
+at **24,000 Hz**. To play through speakers, you'll convert to int16 PCM.
+
+**Checkpoint:** `go build ./internal/voice/` compiles.
+
+---
+
+## Step 30: Build the Speech Queue
+
+**Goal:** Build a thread-safe queue that buffers text for TTS playback.
+
+**Concepts:**
+- **`sync/atomic`** — lightweight thread-safe boolean flags
+- **Buffered channels as queues** — `make(chan string, 32)`
+- **`select` with `default`** — non-blocking channel drain
+- **`encoding/binary`** — converting float32 audio to int16 for speakers
+
+The speech queue sits between the event consumer and TTS. It:
+1. Accepts text via `Enqueue()` (non-blocking, called from event consumer)
+2. Synthesizes via Kokoro and plays audio in order (drain goroutine)
+3. Can be drained instantly on barge-in (`Drain()`)
+4. Tracks whether audio is currently playing (`IsSpeaking()`)
+
+**Task:** Create `internal/voice/queue.go`.
+
+```go
+package voice
+
+import (
+    "context"
+    "encoding/binary"
+    "fmt"
+    "math"
+    "sync"
+    "sync/atomic"
+
+    "github.com/gen2brain/malgo"
+)
+
+// SpeechQueue buffers text and drains through TTS → speaker.
+type SpeechQueue struct {
+    tts       *TTS
+    speakerID int
+    speed     float32
+    ch        chan string
+    speaking  atomic.Bool
+
+    mu     sync.Mutex
+    closed bool
+}
+
+func NewSpeechQueue(tts *TTS, speakerID int, speed float32, bufferSize int) *SpeechQueue {
+    return &SpeechQueue{
+        tts:       tts,
+        speakerID: speakerID,
+        speed:     speed,
+        ch:        make(chan string, bufferSize),
+    }
+}
+
+// Enqueue adds text to the speech queue. Non-blocking unless buffer is full.
+func (q *SpeechQueue) Enqueue(text string) error {
+    q.mu.Lock()
+    defer q.mu.Unlock()
+    if q.closed {
+        return fmt.Errorf("queue is closed")
+    }
+    q.ch <- text
+    return nil
+}
+
+// Drain discards all queued text that hasn't started playing.
+func (q *SpeechQueue) Drain() {
+    for {
+        select {
+        case <-q.ch:
+            // discard
+        default:
+            return
+        }
+    }
+}
+
+// IsSpeaking returns true if audio is playing or the queue has items.
+func (q *SpeechQueue) IsSpeaking() bool {
+    return q.speaking.Load() || len(q.ch) > 0
+}
+
+// Close signals the drain goroutine to stop.
+func (q *SpeechQueue) Close() {
+    q.mu.Lock()
+    defer q.mu.Unlock()
+    if !q.closed {
+        q.closed = true
+        close(q.ch)
+    }
+}
+
+// Run is the drain goroutine. Call with `go queue.Run(ctx)`.
+func (q *SpeechQueue) Run(ctx context.Context) error {
+    for {
+        select {
+        case <-ctx.Done():
+            return ctx.Err()
+        case text, ok := <-q.ch:
+            if !ok {
+                return nil
+            }
+            q.speaking.Store(true)
+            if err := q.synthesizeAndPlay(ctx, text); err != nil {
+                fmt.Printf("TTS error: %v\n", err)
+            }
+            q.speaking.Store(false)
+        }
+    }
+}
+
+func (q *SpeechQueue) synthesizeAndPlay(ctx context.Context, text string) error {
+    // Synthesize text → float32 samples
+    samples := q.tts.Synthesize(text, q.speakerID, q.speed)
+    if len(samples) == 0 {
+        return nil
+    }
+
+    // Convert float32 → int16 PCM bytes for the speaker
+    pcm := float32ToInt16Bytes(samples)
+
+    // Play through malgo
+    return playAudio(ctx, pcm, uint32(q.tts.SampleRate()))
+}
+
+// float32ToInt16Bytes converts normalized float32 audio to little-endian int16 PCM.
+func float32ToInt16Bytes(samples []float32) []byte {
+    buf := make([]byte, len(samples)*2)
+    for i, s := range samples {
+        // Clamp to [-1, 1]
+        if s > 1 {
+            s = 1
+        }
+        if s < -1 {
+            s = -1
+        }
+        val := int16(math.Round(float64(s) * 32767))
+        binary.LittleEndian.PutUint16(buf[i*2:], uint16(val))
+    }
+    return buf
+}
+
+// playAudio plays raw int16 PCM through the default speaker using malgo.
+func playAudio(ctx context.Context, pcm []byte, sampleRate uint32) error {
+    malgoCtx, err := malgo.InitContext(nil, malgo.ContextConfig{}, nil)
+    if err != nil {
+        return fmt.Errorf("audio context init failed: %w", err)
+    }
+    defer malgoCtx.Uninit()
+    defer malgoCtx.Free()
+
+    deviceConfig := malgo.DefaultDeviceConfig(malgo.Playback)
+    deviceConfig.Playback.Format   = malgo.FormatS16
+    deviceConfig.Playback.Channels = 1
+    deviceConfig.SampleRate        = sampleRate
+
+    // Track playback position
+    offset := 0
+    done := make(chan struct{})
+
+    onSendFrames := func(outputBuf, _ []byte, frameCount uint32) {
+        bytesNeeded := int(frameCount) * 2 // 2 bytes per int16 sample
+        remaining := len(pcm) - offset
+
+        if remaining <= 0 {
+            // Fill with silence and signal done
+            for i := range outputBuf {
+                outputBuf[i] = 0
+            }
+            select {
+            case done <- struct{}{}:
+            default:
+            }
+            return
+        }
+
+        if bytesNeeded > remaining {
+            bytesNeeded = remaining
+        }
+        copy(outputBuf, pcm[offset:offset+bytesNeeded])
+        offset += bytesNeeded
+
+        // Fill any remaining buffer with silence
+        for i := bytesNeeded; i < len(outputBuf); i++ {
+            outputBuf[i] = 0
+        }
+    }
+
+    callbacks := malgo.DeviceCallbacks{Data: onSendFrames}
+    device, err := malgo.InitDevice(malgoCtx.Context, deviceConfig, callbacks)
+    if err != nil {
+        return fmt.Errorf("audio device init failed: %w", err)
+    }
+    defer device.Uninit()
+
+    if err := device.Start(); err != nil {
+        return fmt.Errorf("audio device start failed: %w", err)
+    }
+    defer device.Stop()
+
+    // Wait for playback to finish or context cancellation
+    select {
+    case <-ctx.Done():
+        return ctx.Err()
+    case <-done:
+        return nil
+    }
+}
+```
+
+**Let's break down the new patterns:**
+
+**`encoding/binary.LittleEndian.PutUint16`** — Writes a 16-bit unsigned
+integer in little-endian byte order (low byte first). Audio hardware
+expects little-endian PCM. We cast our signed `int16` to `uint16` for
+the binary write — the bit pattern is the same.
+
+**`math.Round`** — Rounds to the nearest integer. Without rounding,
+`int16(float * 32767)` truncates toward zero, introducing subtle audio
+distortion.
+
+**malgo playback callback** — Same pattern as audio capture (Step 33),
+but in reverse. The callback is called from a C thread when the speaker
+needs more audio samples. We copy from our PCM buffer and track the
+offset. When we run out, we fill with silence and signal `done`.
+
+**`select` with `default` (again)** — In the `done` signal:
+```go
+select {
+case done <- struct{}{}:
+default:
+}
+```
+This sends the done signal if anyone is listening, but doesn't block if
+the channel already has a value (prevents the C callback from stalling).
+
+**`atomic.Bool`** — `speaking` is read by `IsSpeaking()` (from the main
+goroutine) and written by `Run()` (from the queue goroutine). `atomic.Bool`
+is cheaper than a mutex for a single boolean flag.
+
+**Checkpoint:** `go build ./internal/voice/` compiles.
+
+---
+
+## Step 31: Build the STT Stage with Moonshine
+
+**Goal:** Wrap sherpa-onnx's Moonshine model for speech-to-text.
+
+**Concepts:**
+- **Offline recognizer** — transcribes a complete audio segment (not streaming)
+- **`OfflineStream`** — a sherpa-onnx object that holds audio for recognition
+- **C resource lifecycle** — `New*` creates, `Delete*` frees
+
+We use the "offline" (non-streaming) recognizer because our VAD will detect
+complete utterances first, then we transcribe the whole thing. This is
+faster and more accurate than streaming word-by-word.
+
+**Task:** Create `internal/voice/stt.go`.
+
+```go
+package voice
+
+import (
+    "fmt"
+
+    sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
+)
+
+// STT wraps sherpa-onnx for speech-to-text using Moonshine.
+type STT struct {
+    recognizer *sherpa.OfflineRecognizer
+}
+
+// STTConfig holds paths to the Moonshine model files.
+type STTConfig struct {
+    Encoder       string // path to encoder_model.ort
+    MergedDecoder string // path to decoder_model_merged.ort
+    Tokens        string // path to tokens.txt
+    NumThreads    int
+}
+
+func NewSTT(cfg STTConfig) (*STT, error) {
+    config := sherpa.OfflineRecognizerConfig{}
+    config.ModelConfig.Moonshine.Encoder       = cfg.Encoder
+    config.ModelConfig.Moonshine.MergedDecoder = cfg.MergedDecoder
+    config.ModelConfig.Tokens     = cfg.Tokens
+    config.ModelConfig.NumThreads = cfg.NumThreads
+    config.ModelConfig.Provider   = "cpu"
+
+    recognizer := sherpa.NewOfflineRecognizer(&config)
+    if recognizer == nil {
+        return nil, fmt.Errorf("failed to create STT recognizer — check model paths")
+    }
+
+    return &STT{recognizer: recognizer}, nil
+}
+
+// Transcribe converts float32 audio samples to text.
+// samples: float32 in [-1, 1], sampleRate: typically 16000.
+func (s *STT) Transcribe(samples []float32, sampleRate int) string {
+    stream := sherpa.NewOfflineStream(s.recognizer)
+    defer sherpa.DeleteOfflineStream(stream)
+
+    stream.AcceptWaveform(sampleRate, samples)
+    s.recognizer.Decode(stream)
+
+    result := stream.GetResult()
+    return result.Text
+}
+
+// Close frees the underlying C resources.
+func (s *STT) Close() {
+    sherpa.DeleteOfflineRecognizer(s.recognizer)
+}
+```
+
+**The sherpa-onnx STT workflow:**
+1. Create `OfflineStream` — a container that holds audio
+2. `AcceptWaveform(sampleRate, samples)` — feed it float32 audio
+3. `Decode(stream)` — run the neural model
+4. `GetResult()` — get the transcribed text
+
+**`defer sherpa.DeleteOfflineStream(stream)`** — Each stream allocates
+C memory. The stream is short-lived (one transcription), so we create
+and delete it per call. The recognizer itself is long-lived.
+
+**Why `[]float32` and not `[]byte`?** sherpa-onnx's Go API works with
+float32 samples directly. The VAD (Step 32) will output `[]float32`
+from its `SpeechSegment.Samples` field, so the types line up naturally.
+
+**Checkpoint:** `go build ./internal/voice/` compiles.
+
+---
+
+## Step 32: Build the VAD Stage with Silero
+
+**Goal:** Detect speech segments using sherpa-onnx's built-in Silero VAD.
+
+**Concepts:**
+- **`VoiceActivityDetector`** — processes audio in fixed-size windows
+- **`SpeechSegment`** — a complete utterance with start position and samples
+- **`CircularBuffer`** — sherpa-onnx's helper for buffering audio chunks
+- **Window-based processing** — VAD requires exactly `WindowSize` samples at a time
+
+**Task:** Create `internal/voice/vad.go`.
+
+sherpa-onnx bundles Silero VAD with a convenient API. You feed it audio
+in windows of exactly 512 samples. It detects speech onset and offset,
+then gives you complete speech segments.
+
+```go
+package voice
+
+import (
+    "fmt"
+
+    sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
+)
+
+// VAD wraps sherpa-onnx Silero Voice Activity Detection.
+type VAD struct {
+    detector *sherpa.VoiceActivityDetector
+    buffer   *sherpa.CircularBuffer
+    config   VADConfig
+}
+
+// VADConfig holds VAD parameters.
+type VADConfig struct {
+    ModelPath          string  // path to silero_vad.onnx
+    Threshold          float32 // speech probability threshold (0.5 is good)
+    MinSilenceDuration float32 // seconds of silence before utterance ends (0.5)
+    MinSpeechDuration  float32 // minimum speech to keep (0.25)
+    MaxSpeechDuration  float32 // max before forced split (10.0)
+    WindowSize         int     // must be 512 for Silero
+    SampleRate         int     // must be 16000
+}
+
+func DefaultVADConfig(modelPath string) VADConfig {
+    return VADConfig{
+        ModelPath:          modelPath,
+        Threshold:          0.5,
+        MinSilenceDuration: 0.5,
+        MinSpeechDuration:  0.25,
+        MaxSpeechDuration:  10.0,
+        WindowSize:         512,
+        SampleRate:         16000,
+    }
+}
+
+func NewVAD(cfg VADConfig) (*VAD, error) {
+    config := sherpa.VadModelConfig{}
+    config.SileroVad.Model              = cfg.ModelPath
+    config.SileroVad.Threshold          = cfg.Threshold
+    config.SileroVad.MinSilenceDuration = cfg.MinSilenceDuration
+    config.SileroVad.MinSpeechDuration  = cfg.MinSpeechDuration
+    config.SileroVad.WindowSize         = cfg.WindowSize
+    config.SileroVad.MaxSpeechDuration  = cfg.MaxSpeechDuration
+    config.SampleRate = cfg.SampleRate
+    config.NumThreads = 1
+    config.Provider   = "cpu"
+
+    var bufferSeconds float32 = 5.0
+    detector := sherpa.NewVoiceActivityDetector(&config, bufferSeconds)
+    if detector == nil {
+        return nil, fmt.Errorf("failed to create VAD — check model path")
+    }
+
+    buffer := sherpa.NewCircularBuffer(cfg.SampleRate * 5) // 5 seconds
+
+    return &VAD{
+        detector: detector,
+        buffer:   buffer,
+        config:   cfg,
+    }, nil
+}
+
+// AcceptSamples feeds audio to the VAD. Returns completed speech segments.
+// samples: float32 in [-1, 1] at 16kHz.
+// This is called from the audio capture callback path.
+func (v *VAD) AcceptSamples(samples []float32) []sherpa.SpeechSegment {
+    v.buffer.Push(samples)
+
+    var segments []sherpa.SpeechSegment
+
+    // Process in windows of exactly WindowSize samples
+    for v.buffer.Size() >= v.config.WindowSize {
+        head := v.buffer.Head()
+        window := v.buffer.Get(head, v.config.WindowSize)
+        v.buffer.Pop(v.config.WindowSize)
+
+        v.detector.AcceptWaveform(window)
+
+        // Collect any completed speech segments
+        for !v.detector.IsEmpty() {
+            seg := v.detector.Front()
+            v.detector.Pop()
+            segments = append(segments, *seg)
+        }
+    }
+
+    return segments
+}
+
+// Flush forces any in-progress speech to be emitted as a segment.
+func (v *VAD) Flush() []sherpa.SpeechSegment {
+    v.detector.Flush()
+    var segments []sherpa.SpeechSegment
+    for !v.detector.IsEmpty() {
+        seg := v.detector.Front()
+        v.detector.Pop()
+        segments = append(segments, *seg)
+    }
+    return segments
+}
+
+// IsSpeech returns true if the user is currently speaking.
+func (v *VAD) IsSpeech() bool {
+    return v.detector.IsSpeech()
+}
+
+// Reset clears all VAD state.
+func (v *VAD) Reset() {
+    v.detector.Reset()
+    v.buffer.Reset()
+}
+
+// Close frees C resources.
+func (v *VAD) Close() {
+    sherpa.DeleteVoiceActivityDetector(v.detector)
+    sherpa.DeleteCircularBuffer(v.buffer)
+}
+```
+
+**The CircularBuffer pattern:**
+
+sherpa-onnx's VAD requires audio in exact chunks of `WindowSize` (512 samples
+= 32ms at 16kHz). But the microphone delivers audio in whatever chunk size
+the driver wants. The `CircularBuffer` absorbs this mismatch:
+
+```
+Mic delivers:  [320 samples] [480 samples] [256 samples] ...
+                     │              │             │
+                     ▼              ▼             ▼
+              ┌─────────────────────────────────────┐
+              │         CircularBuffer              │
+              │  Push() accumulates samples         │
+              │  Get(head, 512) extracts windows    │
+              │  Pop(512) advances the head         │
+              └─────────────────────────────────────┘
+                     │              │
+                     ▼              ▼
+VAD processes: [512 samples] [512 samples] ...
+```
+
+**`SpeechSegment` struct:**
+```go
+type SpeechSegment struct {
+    Start   int        // start position in the audio stream
+    Samples []float32  // the speech audio, ready for STT
+}
+```
+
+The key insight: `seg.Samples` is already `[]float32` — you can pass it
+directly to `stt.Transcribe(seg.Samples, 16000)`. No conversion needed.
+
+**Why `AcceptSamples` returns a slice instead of using a channel?**
+This is a synchronous API — the caller (audio capture goroutine) processes
+segments immediately. A channel would add latency and complexity. The
+pipeline orchestrator (Step 36) will wire this into the goroutine structure.
+
+**Checkpoint:** `go build ./internal/voice/` compiles.
+
+---
+
+## Step 33: Audio Capture
+
+**Goal:** Capture audio from the microphone and feed it to the VAD.
+
+**Concepts:**
+- **CGO** — Go calling C code (miniaudio is a C library)
+- **Callbacks from C** — miniaudio calls a Go function on a C thread
+- **`make(chan T, N)`** — buffered channels absorb timing differences
+- **Backpressure** — dropping data when the consumer can't keep up
+
+**Task:** Create `internal/voice/capture.go`.
+
+We use `malgo` (Go bindings for miniaudio) to capture audio from the
+default microphone. miniaudio calls a Go callback whenever new audio
+samples are available.
+
+```go
+package voice
+
+import (
+    "context"
+    "fmt"
+
+    "github.com/gen2brain/malgo"
+)
+
+// Capture streams audio from the default microphone.
+type Capture struct {
+    sampleRate uint32
+    channels   uint32
+}
+
+func NewCapture(sampleRate, channels uint32) *Capture {
+    return &Capture{
+        sampleRate: sampleRate,
+        channels:   channels,
+    }
+}
+
+// Start begins capturing audio. Returns a channel of float32 audio chunks.
+// Each chunk contains samples normalized to [-1, 1].
+// Cancel the context to stop capturing.
+func (c *Capture) Start(ctx context.Context) (<-chan []float32, error) {
+    malgoCtx, err := malgo.InitContext(nil, malgo.ContextConfig{}, nil)
+    if err != nil {
+        return nil, fmt.Errorf("failed to init audio context: %w", err)
+    }
+
+    deviceConfig := malgo.DefaultDeviceConfig(malgo.Capture)
+    deviceConfig.Capture.Format   = malgo.FormatS16
+    deviceConfig.Capture.Channels = c.channels
+    deviceConfig.SampleRate       = c.sampleRate
+
+    audioCh := make(chan []float32, 16)
+
+    // Callback — called from a C thread when new audio arrives.
+    // NEVER block in this callback.
+    onRecvFrames := func(_, inputSamples []byte, framecount uint32) {
+        // Convert int16 bytes → float32 (the format everything else expects)
+        samples := int16BytesToFloat32(inputSamples)
+
+        select {
+        case audioCh <- samples:
+        default:
+            // Channel full — drop. Better to lose audio than block the driver.
+        }
+    }
+
+    callbacks := malgo.DeviceCallbacks{Data: onRecvFrames}
+    device, err := malgo.InitDevice(malgoCtx.Context, deviceConfig, callbacks)
+    if err != nil {
+        malgoCtx.Uninit()
+        malgoCtx.Free()
+        return nil, fmt.Errorf("failed to init audio device: %w", err)
+    }
+
+    if err := device.Start(); err != nil {
+        device.Uninit()
+        malgoCtx.Uninit()
+        malgoCtx.Free()
+        return nil, fmt.Errorf("failed to start audio device: %w", err)
+    }
+
+    // Cleanup goroutine — waits for context cancellation
+    go func() {
+        <-ctx.Done()
+        device.Stop()
+        device.Uninit()
+        malgoCtx.Uninit()
+        malgoCtx.Free()
+        close(audioCh)
+    }()
+
+    return audioCh, nil
+}
+
+// int16BytesToFloat32 converts little-endian int16 PCM bytes to float32.
+func int16BytesToFloat32(data []byte) []float32 {
+    numSamples := len(data) / 2
+    samples := make([]float32, numSamples)
+    for i := 0; i < numSamples; i++ {
+        s16 := int16(data[2*i]) | int16(data[2*i+1])<<8
+        samples[i] = float32(s16) / 32768.0
+    }
+    return samples
+}
+```
+
+**CGO — What's Happening Under the Hood:**
+
+When you import `malgo`, Go compiles C code alongside your Go code. The
+`malgo` package contains C source files (miniaudio) that get compiled by
+your system's C compiler (gcc/clang).
+
+The callback `onRecvFrames` is called from C code on a C thread. Rules:
+- Don't allocate too much (GC pressure from a C thread can cause issues)
+- Don't block (you'd stall the audio driver)
+- Copy data out quickly (the buffer gets reused)
+
+**Why convert to `[]float32` immediately?** Both VAD and STT expect
+float32 samples. Converting once in the capture callback means every
+downstream consumer gets the right format without re-converting.
+
+**The backpressure pattern:**
+```go
+select {
+case audioCh <- samples:
+default:
+    // drop
+}
+```
+If the channel is full (consumer is slow), drop the chunk instead of
+blocking. You never want to block the audio driver thread.
+
+**Cleanup chain:** Cleanup happens in reverse initialization order
+(device → context → free) in a goroutine that waits for `ctx.Done()`.
+
+**Checkpoint:** `go build ./internal/voice/` compiles (requires CGO).
+
+---
+
+## Step 34: Build the Event Consumer
+
+**Goal:** Read agent events and feed text to the speech queue.
+
+**Concepts:**
+- **`strings.Builder`** — efficient string concatenation (don't use `+` in loops)
+- **`select`** with context cancellation — stopping gracefully
+- **Sentence boundary detection** — buffering tokens until a natural pause
+
+This is the bridge between the agent and the voice. The event consumer reads
+the same `<-chan *event.Event` you consumed in the CLI loop (Phase 1) and
+WebSocket handler (Phase 3), but instead of printing text, it enqueues it
+for TTS.
+
+**Task:** Create `internal/voice/consumer.go`.
+
+```go
+package voice
+
+import (
+    "context"
+    "strings"
+    "unicode"
+
+    "trpc.group/trpc-go/trpc-agent-go/event"
+)
+
+// ConsumeEvents reads agent events and enqueues speech.
+// Runs on its own goroutine. Returns when events closes or ctx cancels.
+func ConsumeEvents(
+    ctx context.Context,
+    events <-chan *event.Event,
+    queue *SpeechQueue,
+    announcer EventAnnouncer,
+) {
+    var sentence strings.Builder
+
+    for {
+        select {
+        case <-ctx.Done():
+            return
+
+        case evt, ok := <-events:
+            if !ok {
+                // Event channel closed — agent finished.
+                // Flush any buffered text.
+                if sentence.Len() > 0 {
+                    queue.Enqueue(sentence.String())
+                }
+                return
+            }
+
+            if len(evt.Choices) == 0 {
+                continue
+            }
+
+            choice := evt.Choices[0]
+
+            // Tool call — optionally announce it
+            if len(choice.Message.ToolCalls) > 0 {
+                for _, tc := range choice.Message.ToolCalls {
+                    ann := announcer.AnnounceToolCall(tc.Function.Name)
+                    if ann != "" {
+                        // Flush buffered text first
+                        if sentence.Len() > 0 {
+                            queue.Enqueue(sentence.String())
+                            sentence.Reset()
+                        }
+                        queue.Enqueue(ann)
+                    }
+                }
+                continue
+            }
+
+            // Tool result — let the LLM summarize it (don't speak raw JSON)
+            if choice.Message.Role == "tool" {
+                continue
+            }
+
+            // Streaming text — buffer and speak at sentence boundaries
+            if choice.Delta.Content != "" {
+                sentence.WriteString(choice.Delta.Content)
+
+                if isSentenceBoundary(sentence.String()) {
+                    queue.Enqueue(sentence.String())
+                    sentence.Reset()
+                }
+            }
+        }
+    }
+}
+
+// isSentenceBoundary checks if the buffered text ends at a natural pause.
+func isSentenceBoundary(text string) bool {
+    trimmed := strings.TrimRightFunc(text, unicode.IsSpace)
+    if trimmed == "" {
+        return false
+    }
+
+    last := rune(trimmed[len(trimmed)-1])
+
+    switch last {
+    case '.', '!', '?', ':', ';':
+        return true
+    }
+
+    return false
+}
+```
+
+**`strings.Builder`** — The efficient way to concatenate strings in Go.
+Every time you do `s = s + more`, Go allocates a new string and copies
+everything. `strings.Builder` maintains an internal buffer and only
+allocates when needed:
+
+```go
+// BAD — O(n²) allocations in a loop
+result := ""
+for _, word := range words {
+    result = result + word + " "
+}
+
+// GOOD — O(n) with strings.Builder
+var b strings.Builder
+for _, word := range words {
+    b.WriteString(word)
+    b.WriteString(" ")
+}
+result := b.String()
+```
+
+**Why skip tool results?** The LLM sees the tool result and generates a
+natural language summary. Speaking raw JSON would be terrible UX. We let
+the LLM's streaming text flow through as tokens, spoken at sentence boundaries.
+
+**Checkpoint:** `go build ./internal/voice/` compiles.
+
+---
+
+## Step 35: Build the EventAnnouncer
+
+**Goal:** Map tool names to natural spoken phrases.
+
+**Concepts:**
+- **Map literals** — `map[string]string{"key": "value"}`
+- **Map lookup with comma-ok** — `val, ok := m[key]`
+
+**Task:** Create `internal/voice/announcer.go`.
+
+```go
+package voice
+
+// EventAnnouncer decides what the voice should say for tool events.
+type EventAnnouncer interface {
+    AnnounceToolCall(toolName string) string
+}
+
+// DefaultAnnouncer maps tool names to natural phrases.
+type DefaultAnnouncer struct {
+    phrases map[string]string
+}
+
+func NewDefaultAnnouncer() *DefaultAnnouncer {
+    return &DefaultAnnouncer{
+        phrases: map[string]string{
+            "search_web":      "Let me search for that...",
+            "update_calendar": "Updating your calendar...",
+            "capture_image":   "Let me take a look...",
+            // Fast tools — no announcement needed:
+            // "current_time" → absent from map → returns ""
+            // "calculator"   → absent from map → returns ""
+            // "look_at"      → absent from map → robot movement is visible
+        },
+    }
+}
+
+func (a *DefaultAnnouncer) AnnounceToolCall(toolName string) string {
+    phrase, ok := a.phrases[toolName]
+    if !ok {
+        return ""
+    }
+    return phrase
+}
+```
+
+**Map comma-ok pattern:**
+```go
+value, ok := myMap[key]
+// ok is true if key exists, false if not
+// value is the zero value ("" for string) if key is missing
+```
+
+Go maps always return a value — the zero value for the type. The comma-ok
+lets you distinguish "key exists with zero value" from "key doesn't exist."
+
+**Checkpoint:** `go build ./internal/voice/` compiles.
+
+---
+
+## Step 36: Build the Pipeline Orchestrator
+
+**Goal:** Wire all stages together with `errgroup` for lifecycle management.
+
+**Concepts:**
+- **`errgroup.WithContext`** — creates a group with a shared cancellable context
+- **Composition** — the pipeline holds references to all stages
+- **Goroutine coordination** — start together, stop together on error
+
+**Task:** Create `internal/voice/live_pipeline.go`.
+
+This implements the `Pipeline` interface from Step 28. It wires:
+Capture → VAD → STT → transcript channel, and manages the speech queue.
+
+```go
+package voice
+
+import (
+    "context"
+    "fmt"
+    "time"
+
+    "golang.org/x/sync/errgroup"
+)
+
+// LivePipeline is the production Pipeline implementation.
+type LivePipeline struct {
+    capture *Capture
+    vad     *VAD
+    stt     *STT
+    queue   *SpeechQueue
+
+    cancelFunc context.CancelFunc
+    group      *errgroup.Group
+}
+
+func NewLivePipeline(capture *Capture, vad *VAD, stt *STT, queue *SpeechQueue) *LivePipeline {
+    return &LivePipeline{
+        capture: capture,
+        vad:     vad,
+        stt:     stt,
+        queue:   queue,
+    }
+}
+
+func (p *LivePipeline) Start(ctx context.Context) (<-chan Transcript, error) {
+    pipeCtx, cancel := context.WithCancel(ctx)
+    p.cancelFunc = cancel
+
+    g, gCtx := errgroup.WithContext(pipeCtx)
+    p.group = g
+
+    // Stage 1: Capture audio from microphone → float32 chunks
+    audioCh, err := p.capture.Start(gCtx)
+    if err != nil {
+        cancel()
+        return nil, fmt.Errorf("audio capture failed: %w", err)
+    }
+
+    transcripts := make(chan Transcript, 4)
+
+    // Stage 2+3: VAD + STT goroutine
+    // Reads audio chunks, feeds VAD, transcribes speech segments
+    g.Go(func() error {
+        defer close(transcripts)
+
+        for {
+            select {
+            case <-gCtx.Done():
+                return gCtx.Err()
+            case samples, ok := <-audioCh:
+                if !ok {
+                    // Mic closed — flush any remaining speech
+                    for _, seg := range p.vad.Flush() {
+                        text := p.stt.Transcribe(seg.Samples, 16000)
+                        if text != "" {
+                            transcripts <- Transcript{
+                                Text:      text,
+                                Timestamp: time.Now(),
+                            }
+                        }
+                    }
+                    return nil
+                }
+
+                // Feed audio to VAD — returns completed speech segments
+                segments := p.vad.AcceptSamples(samples)
+
+                for _, seg := range segments {
+                    text := p.stt.Transcribe(seg.Samples, 16000)
+                    if text == "" {
+                        continue
+                    }
+                    fmt.Printf("[STT]: %s\n", text)
+                    transcripts <- Transcript{
+                        Text:      text,
+                        Timestamp: time.Now(),
+                    }
+                }
+            }
+        }
+    })
+
+    // Stage 4: Speech queue drain (TTS → speaker)
+    g.Go(func() error {
+        return p.queue.Run(gCtx)
+    })
+
+    return transcripts, nil
+}
+
+func (p *LivePipeline) Enqueue(_ context.Context, text string) error {
+    return p.queue.Enqueue(text)
+}
+
+func (p *LivePipeline) DrainQueue() {
+    p.queue.Drain()
+}
+
+func (p *LivePipeline) Interrupt() {
+    p.queue.Drain()
+}
+
+func (p *LivePipeline) IsSpeaking() bool {
+    return p.queue.IsSpeaking()
+}
+
+func (p *LivePipeline) Close() error {
+    if p.cancelFunc != nil {
+        p.cancelFunc()
+    }
+    p.vad.Close()
+    p.stt.Close()
+    p.queue.Close()
+    if p.group != nil {
+        return p.group.Wait()
+    }
+    return nil
+}
+```
+
+**`errgroup.WithContext` in detail:**
+
+```go
+g, gCtx := errgroup.WithContext(pipeCtx)
+```
+
+This creates:
+- `g` — the group. Launch goroutines with `g.Go(func() error { ... })`
+- `gCtx` — a derived context. **If any goroutine returns a non-nil error,
+  gCtx is automatically cancelled**, stopping all other goroutines.
+
+The lifecycle:
+1. `g.Go(f1)` and `g.Go(f2)` launch goroutines
+2. If `f1` returns an error, `gCtx` is cancelled
+3. `f2` sees `<-gCtx.Done()` fire and exits
+4. `g.Wait()` returns `f1`'s error
+
+**Why combine VAD + STT in one goroutine?** The VAD's `AcceptSamples`
+is synchronous — it processes audio and returns segments immediately.
+There's no need for a separate goroutine between VAD and STT. The
+audio capture callback is the async boundary; everything after it
+runs sequentially in one goroutine: feed VAD → get segments → transcribe.
+
+**`defer close(transcripts)`** — When this goroutine exits, closing
+the channel tells the main voice loop that no more transcripts are
+coming. The `for transcript := range transcripts` loop exits cleanly.
+
+**Checkpoint:** `go build ./internal/voice/` compiles.
+
+---
+
+## Step 37: Wire Voice Mode into main.go
+
+**Goal:** Add a `voice` subcommand that runs the full voice pipeline.
+
+**Concepts:**
+- **Per-task context cancellation** — barge-in pattern
+- **Goroutine-per-task** — each user turn runs on its own goroutine
+- **Wiring everything together** — the final integration
+
+**Task:** Update `cmd/hugo/main.go` to add voice mode.
+
+```go
+import (
+    "hugo/internal/voice"
+    "trpc.group/trpc-go/trpc-agent-go/model"
+    "trpc.group/trpc-go/trpc-agent-go/runner"
+)
+
+func main() {
+    _ = godotenv.Load(".env.local")
+
+    cfg, err := agent.LoadConfig()
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+        os.Exit(1)
+    }
+
+    r := agent.NewRunner(cfg)
+
+    if len(os.Args) > 1 {
+        switch os.Args[1] {
+        case "serve":
+            // ... existing server code ...
+
+        case "voice":
+            runVoice(r)
+            return
+        }
+    }
+
+    // ... existing CLI loop ...
+}
+
+func runVoice(r runner.Runner) {
+    ctx := context.Background()
+
+    // --- Build all pipeline stages ---
+
+    // TTS: Kokoro (local, 24kHz output)
+    tts, err := voice.NewTTS(voice.TTSConfig{
+        Model:      "models/kokoro-en-v0_19/model.onnx",
+        Voices:     "models/kokoro-en-v0_19/voices.bin",
+        Tokens:     "models/kokoro-en-v0_19/tokens.txt",
+        DataDir:    "models/kokoro-en-v0_19/espeak-ng-data",
+        NumThreads: 2,
+        SpeakerID:  0,   // try 0-10 for different voices
+        Speed:      1.0,
+    })
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "TTS error: %v\n", err)
+        os.Exit(1)
+    }
+
+    // STT: Moonshine (local, 16kHz input)
+    stt, err := voice.NewSTT(voice.STTConfig{
+        Encoder:       "models/sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27/encoder_model.ort",
+        MergedDecoder: "models/sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27/decoder_model_merged.ort",
+        Tokens:        "models/sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27/tokens.txt",
+        NumThreads:    2,
+    })
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "STT error: %v\n", err)
+        os.Exit(1)
+    }
+
+    // VAD: Silero (local)
+    vad, err := voice.NewVAD(voice.DefaultVADConfig("models/silero_vad.onnx"))
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "VAD error: %v\n", err)
+        os.Exit(1)
+    }
+
+    // Audio capture: microphone at 16kHz mono
+    capture := voice.NewCapture(16000, 1)
+
+    // Speech queue: connects TTS to speaker
+    queue := voice.NewSpeechQueue(tts, 0, 1.0, 32)
+
+    // Wire it all together
+    pipeline := voice.NewLivePipeline(capture, vad, stt, queue)
+
+    transcripts, err := pipeline.Start(ctx)
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "Pipeline error: %v\n", err)
+        os.Exit(1)
+    }
+    defer pipeline.Close()
+
+    // Speak a greeting to confirm TTS works
+    pipeline.Enqueue(ctx, "Hello! HUGO voice mode is active.")
+
+    fmt.Println("HUGO voice mode active. Speak into your microphone.")
+    fmt.Println("All processing is local — no cloud APIs needed.")
+
+    announcer := voice.NewDefaultAnnouncer()
+    var taskCancel context.CancelFunc
+
+    // Main voice loop
+    for transcript := range transcripts {
+        fmt.Printf("[You]: %s\n", transcript.Text)
+
+        // Barge-in: cancel any in-progress task
+        if taskCancel != nil {
+            taskCancel()
+            pipeline.Interrupt()
+        }
+
+        taskCtx, cancel := context.WithCancel(ctx)
+        taskCancel = cancel
+
+        go func(t voice.Transcript) {
+            defer cancel()
+
+            events, err := r.Run(
+                taskCtx,
+                "user-001",
+                "session-001",
+                model.NewUserMessage(t.Text),
+            )
+            if err != nil {
+                pipeline.Enqueue(taskCtx, "Sorry, something went wrong.")
+                return
+            }
+
+            voice.ConsumeEvents(taskCtx, events, queue, announcer)
+        }(transcript)
+    }
+}
+```
+
+**The barge-in pattern in detail:**
+
+```go
+// 1. HUGO is mid-task, speaking and calling tools
+// 2. User interrupts: "Actually, never mind"
+//    VAD detects speech → STT transcribes → transcript arrives
+
+// 3. Barge-in fires:
+if taskCancel != nil {
+    taskCancel()           // cancels taskCtx → stops runner + consumer
+    pipeline.Interrupt()   // drains speech queue → stops TTS playback
+}
+
+// 4. New task starts with fresh context:
+taskCtx, cancel := context.WithCancel(ctx)
+taskCancel = cancel
+go func(t voice.Transcript) { ... }(transcript)
+```
+
+**`go func(t voice.Transcript) { ... }(transcript)`** — Why pass `transcript`
+as an argument instead of capturing it? This is a **closure capture** gotcha:
+
+```go
+// BAD — transcript changes on next loop iteration
+go func() {
+    process(transcript) // might be the WRONG transcript!
+}()
+
+// GOOD — t is a copy, frozen at launch time
+go func(t voice.Transcript) {
+    process(t)
+}(transcript)
+```
+
+Loop variables are reused — if you capture them in a closure, you get
+the variable itself (which changes), not a snapshot of its value.
+
+**No API keys needed!** Everything runs locally:
+- Kokoro TTS: local ONNX model
+- Moonshine STT: local ONNX model
+- Silero VAD: local ONNX model
+- Audio: direct microphone/speaker via malgo
+
+**Checkpoint:** `go build ./cmd/hugo` compiles with the voice subcommand.
+
+---
+
+## Step 38: Test the Voice Pipeline
+
+**Goal:** Verify the full voice loop works end-to-end.
+
+### 38a: Test TTS in Isolation
+
+Run voice mode:
+```bash
+go run ./cmd/hugo voice
+```
+
+You should hear "Hello! HUGO voice mode is active." through your speakers.
+If not, check:
+1. Model files exist in `models/` (see Step 26 downloads)
+2. Your system audio output is working
+3. CGO is enabled: `CGO_ENABLED=1 go run ./cmd/hugo voice`
+
+### 38b: Test the Full Loop
+
+With TTS working:
+
+1. Speak into your microphone: "What time is it?"
+2. You should see: `[STT]: What time is it?` and `[You]: What time is it?`
+3. HUGO speaks the response through your speakers
+
+### 38c: Test Barge-In
+
+1. Ask a question that produces a long response: "Tell me about the Go
+   programming language in detail"
+2. While HUGO is speaking, say something new: "Stop"
+3. HUGO should stop speaking and respond to "Stop"
+
+### 38d: Test Multi-Step Tool Use
+
+```
+You: What time is it and what is 42 times 17?
+```
+
+You should hear HUGO speak progress between tool calls.
+
+### Troubleshooting
+
+**"failed to init audio context"** — CGO not set up or no audio device.
+Run `xcode-select --install` (macOS) or install `gcc` + `libasound2-dev` (Linux).
+
+**"failed to create VAD"** — Model file missing. Check that
+`models/silero_vad.onnx` exists.
+
+**"failed to create TTS engine"** — Kokoro model files missing or wrong paths.
+Check that `models/kokoro-en-v0_19/` contains `model.onnx`, `voices.bin`,
+`tokens.txt`, and `espeak-ng-data/`.
+
+**"failed to create STT recognizer"** — Moonshine model files missing.
+Check `models/sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27/`.
+
+**No speech detected** — Lower the VAD threshold:
+```go
+cfg := voice.DefaultVADConfig("models/silero_vad.onnx")
+cfg.Threshold = 0.3  // more sensitive
+```
+
+**Audio garbled** — Ensure capture is 16kHz mono and TTS playback is
+24kHz mono. The sample rates are different by design (STT models want
+16kHz, Kokoro outputs 24kHz).
+
+---
+
+## Step 39: Improving the Pipeline (Optional)
+
+### 39a: Use Streaming TTS for Lower Latency
+
+Replace `Synthesize` with `SynthesizeWithCallback` in the speech queue
+to start playback before synthesis finishes:
+
+```go
+func (q *SpeechQueue) synthesizeAndPlay(ctx context.Context, text string) error {
+    q.tts.SynthesizeWithCallback(text, q.speakerID, q.speed,
+        func(samples []float32) bool {
+            // Check if we've been cancelled (barge-in)
+            select {
+            case <-ctx.Done():
+                return false // abort synthesis
+            default:
+            }
+            // Play each chunk immediately
+            pcm := float32ToInt16Bytes(samples)
+            playAudio(ctx, pcm, uint32(q.tts.SampleRate()))
+            return true
+        })
+    return nil
+}
+```
+
+### 39b: Try Different Kokoro Voices
+
+Kokoro v0.19 has 11 English speakers (IDs 0-10). Change the speaker ID
+in the TTS config to find one you like:
+
+```go
+queue := voice.NewSpeechQueue(tts, 3, 1.0, 32) // try speaker 3
+```
+
+### 39c: Upgrade to Moonshine Base for Better Accuracy
+
+If Moonshine Tiny makes too many transcription errors, download the
+base model (larger but more accurate):
+
+```bash
+cd models
+curl -SL -O https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-moonshine-base-en-quantized-2026-02-27.tar.bz2
+tar xf sherpa-onnx-moonshine-base-en-quantized-2026-02-27.tar.bz2
+```
+
+Then update the STT config paths. The Moonshine Base model (168M params)
+is significantly more accurate while still being fast on CPU.
+
+### 39d: Add WebSocket Voice Relay
+
+Stream the voice pipeline over WebSocket so a browser can be the
+microphone/speaker instead of the local hardware:
+
+```go
+// In server.go, add a /ws/voice endpoint that:
+// 1. Receives binary audio frames from the browser
+// 2. Feeds them to VAD → STT
+// 3. Runs the agent
+// 4. Streams TTS audio back as binary WebSocket frames
+```
+
+This bridges Phase 3 (WebSocket) and Phase 4 (Voice) — left as an
+exercise. The key insight: the Pipeline interface doesn't care where
+audio comes from. You can replace `Capture` with a WebSocket audio source.
+
+---
+
+## What You've Learned in Phase 4
+
+| Go Concept | Where You Used It |
+|---|---|
+| `select` | Event consumer, speech queue drain, audio capture |
+| `context.WithCancel` | Barge-in (task cancellation) |
+| `errgroup` | Pipeline goroutine lifecycle |
+| `sync.Mutex` | TTS thread safety |
+| `sync/atomic` | `IsSpeaking()` flag |
+| `strings.Builder` | Sentence buffering in event consumer |
+| `encoding/binary` | float32 → int16 PCM conversion |
+| `math.Round` | Accurate audio sample conversion |
+| Maps (`map[string]string`) | Announcer phrase lookup |
+| Map comma-ok pattern | `val, ok := m[key]` |
+| CGO | sherpa-onnx (VAD, STT, TTS), malgo (audio) |
+| Callbacks from C | `malgo.DeviceCallbacks.Data` |
+| C resource lifecycle | `New*/Delete*` pattern for sherpa-onnx objects |
+| Closure capture gotcha | `go func(t Transcript) { ... }(transcript)` |
+| Backpressure (`select` + `default`) | Dropping audio when consumer is slow |
+| Circular buffer | sherpa-onnx `CircularBuffer` for VAD windowing |
+
+### What's Running Locally
+
+Everything in this phase runs on your machine with zero cloud dependencies:
+
+| Component | Model | Size | Latency |
+|---|---|---|---|
+| VAD | Silero | 2 MB | ~1ms per 32ms window |
+| STT | Moonshine Tiny | ~70 MB | ~50ms per utterance |
+| TTS | Kokoro v0.19 | ~330 MB | ~200-500ms per sentence |
+| Audio | malgo (miniaudio) | — | ~10ms buffer |
+
+Total model footprint: ~400 MB. No API keys. No network. Works offline.
+
+---
+
 ## Next Steps
 
-Phase 4 (Voice Pipeline) introduces:
-- **`errgroup`** — managing multiple goroutines with error propagation
-- **`context.WithCancel`** — cancellable contexts for barge-in
-- **`select`** — multiplexing across multiple channels
-- **`sync.Mutex`** — protecting the speech queue
-- **CGO** — calling C libraries (for Silero VAD and whisper.cpp)
-- **`io.Pipe`** — streaming audio between goroutines
+Phase 5 (Reachy Mini Integration) introduces:
+- **HTTP client construction** — building a REST client with `net/http`
+- **WebSocket client** — `gorilla/websocket` as a client (not just server)
+- **`oapi-codegen`** — generating Go types from OpenAPI specs
+- **`encoding/json`** — custom marshal/unmarshal for the robot API
+- **Integration testing** — testing against a real (or mocked) HTTP server
 
-Phase 4 is a significant step up in complexity. Make sure you're comfortable
-with goroutines, channels, and `defer` before starting it.
+Phase 5 is where HUGO gets a body. Make sure you're comfortable with the
+voice pipeline before starting — the robot tools will need to coordinate
+with voice feedback.

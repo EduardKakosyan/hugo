@@ -4,7 +4,16 @@ go 1.25.0
 
 require github.com/joho/godotenv v1.5.1
 
-require github.com/gorilla/websocket v1.5.3
+require (
+	github.com/gorilla/websocket v1.5.3
+	github.com/k2-fsa/sherpa-onnx-go v1.12.30
+)
+
+require (
+	github.com/k2-fsa/sherpa-onnx-go-linux v1.12.31 // indirect
+	github.com/k2-fsa/sherpa-onnx-go-macos v1.12.31 // indirect
+	github.com/k2-fsa/sherpa-onnx-go-windows v1.12.31 // indirect
+)
 
 require (
 	github.com/bmatcuk/doublestar/v4 v4.9.1 // indirect
@@ -30,7 +39,7 @@ require (
 	go.uber.org/multierr v1.10.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
 	golang.org/x/net v0.34.0 // indirect
-	golang.org/x/sync v0.10.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.30.0 // indirect
 	golang.org/x/text v0.21.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20240822170219-fc7c04adadcd // indirect
