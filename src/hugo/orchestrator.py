@@ -87,8 +87,12 @@ def _build_specs(config: Config) -> list[ManagedProcessSpec]:
                 str(llm_port),
             ],
             health_check=_http_health_check(config.llm_base_url),
-            # A ~60-70GB MoE model load is realistically minutes, not seconds.
-            health_check_timeout=1800.0,
+            # A ~80GB MoE model load is realistically minutes, not seconds —
+            # and CUDA graph capture / torch.compile for this model size can
+            # take longer than 30 minutes on its own, confirmed directly on
+            # dgx1 (a 1800s timeout was hit mid-compilation with no errors,
+            # just still working). 60 minutes total budget instead.
+            health_check_timeout=3600.0,
             health_check_interval=5.0,
         ),
         ManagedProcessSpec(
