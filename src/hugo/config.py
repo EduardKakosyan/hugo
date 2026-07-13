@@ -26,7 +26,13 @@ class Config(BaseSettings):
     # default port (see robot/reachy_client.py), confirmed colliding via a
     # real "OSError: [Errno 98] Address already in use" on dgx1.
     llm_base_url: str = "http://127.0.0.1:8080/v1"
-    llm_model: str = "nemotron-3-super-120b-a12b"
+    # NVFP4 (NVIDIA's native 4-bit format, ~80GB total download) matches
+    # ADR 0004's "4-bit quant, ~60-70GB" and GB10/Blackwell's native FP4
+    # tensor core support. Verified as a real, public (non-gated) HF repo
+    # on 2026-07-13 — the previous placeholder "nemotron-3-super-120b-a12b"
+    # was never a real model ID and caused a real 401/RepositoryNotFoundError
+    # crash on dgx1.
+    llm_model: str = "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
     stt_ws_url: str = "ws://127.0.0.1:8001"
     tts_ws_url: str = "ws://127.0.0.1:8002"
 
