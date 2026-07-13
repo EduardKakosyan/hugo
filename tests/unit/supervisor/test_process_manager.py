@@ -9,6 +9,7 @@ against the pytest process itself.
 """
 
 import asyncio
+import signal
 from pathlib import Path
 from typing import Any
 
@@ -47,10 +48,20 @@ class FakeProcess:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_process_group(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Prevent start_all() from touching this test process's real group."""
+def _isolate_process_group(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, int]]:
+    """Prevent start_all()/stop_all() from touching this test process's real
+    group — including the group-wide killpg sweep stop_all() now does,
+    which would otherwise call the real os.killpg(4242, ...) using this
+    fixture's fake pgid. killpg_calls records (pgid, sig) for tests that
+    want to assert the sweep happened, without it ever executing for real."""
+    killpg_calls: list[tuple[int, int]] = []
     monkeypatch.setattr("hugo.supervisor.process_manager.os.setpgid", lambda pid, pgid: None)
     monkeypatch.setattr("hugo.supervisor.process_manager.os.getpgrp", lambda: 4242)
+    monkeypatch.setattr(
+        "hugo.supervisor.process_manager.os.killpg",
+        lambda pgid, sig: killpg_calls.append((pgid, sig)),
+    )
+    return killpg_calls
 
 
 @pytest.fixture
@@ -184,6 +195,25 @@ async def test_stop_all_terminates_in_reverse_order_then_clears_pidfile(
     assert all(proc.terminated for proc in fake_processes)
     assert not any(proc.killed for proc in fake_processes)
     assert manager.pidfile.read() is None
+
+
+async def test_stop_all_sweeps_the_whole_process_group(
+    tmp_path: Path,
+    fake_processes: list[FakeProcess],
+    _isolate_process_group: list[tuple[int, int]],
+) -> None:
+    # Regression test for a real bug found on real hardware: vLLM spawns
+    # its own "EngineCore" child process that outlived its terminated
+    # parent (reparented to init), still holding ~70GB of GPU memory —
+    # per-proc terminate()/kill() only reaches the top-level process we
+    # spawned directly, not that kind of descendant. stop_all() must also
+    # sweep the whole process group unconditionally.
+    manager = ProcessManager(pidfile=Pidfile(tmp_path / "hugo.pid"))
+    await manager.start_all([ManagedProcessSpec(name="a", command=["true"])])
+
+    await manager.stop_all()
+
+    assert (4242, signal.SIGKILL) in _isolate_process_group
 
 
 async def test_stop_all_escalates_to_kill_for_stragglers(

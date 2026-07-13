@@ -48,13 +48,15 @@ class ProcessDied(RuntimeError):
 class ProcessManager:
     pidfile: Pidfile
     _processes: list[tuple[str, asyncio.subprocess.Process]] = field(default_factory=list)
+    _pgid: int | None = None
 
     async def start_all(self, specs: list[ManagedProcessSpec]) -> None:
         """Become our own process group leader, then spawn and health-check
         each spec in order. Tears down everything already started if any
         spec fails, so a partial start never leaks subprocesses."""
         os.setpgid(0, 0)
-        self.pidfile.write(os.getpgrp())
+        self._pgid = os.getpgrp()
+        self.pidfile.write(self._pgid)
 
         try:
             for spec in specs:
@@ -68,7 +70,15 @@ class ProcessManager:
 
     async def stop_all(self, grace_period: float = 10.0) -> None:
         """Graceful shutdown: SIGTERM everything in reverse start order,
-        wait, then SIGKILL any stragglers."""
+        wait, then SIGKILL any stragglers. Finishes with a group-wide
+        SIGKILL sweep regardless — confirmed necessary on real hardware:
+        vLLM spawns its own "EngineCore" child process that isn't reliably
+        reachable by signaling just the top-level proc we tracked (observed
+        directly: an EngineCore process outlived its terminated parent,
+        reparented to init, still holding ~70GB of GPU memory). Per-proc
+        signaling only reaches processes we spawned directly; the group
+        sweep catches any descendant that inherited our process group
+        without us tracking it individually — see docs/adr/0002."""
         for _name, proc in reversed(self._processes):
             if proc.returncode is None:
                 proc.terminate()
@@ -78,6 +88,9 @@ class ProcessManager:
             if proc.returncode is None:
                 proc.kill()
         await self._wait_all_exited(grace_period)
+
+        if self._pgid is not None:
+            _safe_killpg(self._pgid, signal.SIGKILL)
 
         self._processes.clear()
         self.pidfile.remove()
