@@ -8,33 +8,80 @@ base dependency since it needs system packages (cairo, gobject-introspection
 dev headers) unlikely to be present on a dev machine (see the lazy import
 below and pyproject.toml).
 
-VERIFIED on dgx1 (2026-07-13): reachy_mini==1.9.0 installs (after adding
-libcairo2-dev, python3-dev, libgirepository1.0-dev system packages) and its
-MediaManager API matches this module (get_audio_sample/push_audio_sample as
-float32 numpy arrays, start/stop_recording, start/stop_playing,
-get_input/output_audio_samplerate). NOT YET verified against a live,
-physically-connected robot — none was plugged into dgx1 at the time this
-was written. Re-verify with scripts/dev_mic_check.py once hardware is
-available; get_audio_sample()'s exact blocking/polling behavior in
-particular should be confirmed against real audio, not just inspected.
+FULLY VERIFIED on dgx1 (2026-07-13) against a physically-connected robot,
+including a real mic-record-then-playback round trip via `hugo dev echo`:
+reachy_mini==1.9.0 installs (after adding libcairo2-dev, python3-dev,
+libgirepository1.0-dev system packages), the daemon starts and detects all
+9 motors (after also adding the `dialout` group for /dev/ttyACM0 serial
+access), and the MediaManager API matches this module.
+
+media_backend is explicitly "local" — the daemon's own default media
+server still logs "Failed to create webrtcsink element" (GStreamer's
+WebRTC Rust plugin isn't packaged for Ubuntu and needs a from-source Rust
+build), but that only affects the daemon's optional remote-streaming path.
+Explicitly requesting the LOCAL backend uses GStreamer's local audio
+pipeline directly (no WebRTC signaling needed) since the SDK client and
+daemon are on the same machine — sidesteps the whole Rust-plugin problem.
+(Note: "sounddevice_no_video" also worked in testing and is what
+originally revealed this, but the SDK flags it as deprecated in favor of
+"local", which is used here instead. Camera init still fails gracefully
+under LOCAL too — a separate missing GStreamer element, `unixfdsrc` — but
+that's fine for M1's audio-only scope.)
+
+Confirmed real upstream SDK limitation, not our bug: on a cold start
+(no daemon running yet), `ReachyMini(spawn_daemon=True, ...)` spawns the
+daemon subprocess but does NOT reliably wait for it to finish its ~15-20s
+startup (motor detection etc.) before attempting to connect — even passing
+an explicit `timeout=45.0` didn't help, confirmed directly. The spawned
+daemon keeps running in the background regardless, and a second
+`ReachyMini(...)` call a bit later connects to it immediately (the SDK
+correctly detects "daemon already running" and doesn't double-spawn) — so
+we retry with a delay rather than working around it more invasively.
 """
 
 import asyncio
+import logging
+import time
 from collections.abc import AsyncIterator
+from typing import Any
 
 import numpy as np
 
+logger = logging.getLogger(__name__)
+
 POLL_INTERVAL_S = 0.01
+DAEMON_CONNECT_RETRIES = 3
+DAEMON_CONNECT_RETRY_DELAY_S = 20.0
 
 
 class ReachyMiniClient:
     def __init__(self, use_sim: bool = False) -> None:
         from reachy_mini import ReachyMini
 
-        self._robot = ReachyMini(spawn_daemon=True, use_sim=use_sim)
+        self._robot = self._connect_with_retries(ReachyMini, use_sim)
         self._media = self._robot.media
         self.input_sample_rate_hz: int = self._media.get_input_audio_samplerate()
         self.output_sample_rate_hz: int = self._media.get_output_audio_samplerate()
+
+    @staticmethod
+    def _connect_with_retries(reachy_mini_cls: Any, use_sim: bool) -> Any:
+        last_error: ConnectionError | None = None
+        for attempt in range(1, DAEMON_CONNECT_RETRIES + 1):
+            try:
+                return reachy_mini_cls(spawn_daemon=True, use_sim=use_sim, media_backend="local")
+            except ConnectionError as e:
+                last_error = e
+                logger.warning(
+                    "reachy_mini connection attempt %d/%d failed (daemon likely "
+                    "still cold-starting): %s",
+                    attempt,
+                    DAEMON_CONNECT_RETRIES,
+                    e,
+                )
+                if attempt < DAEMON_CONNECT_RETRIES:
+                    time.sleep(DAEMON_CONNECT_RETRY_DELAY_S)
+        assert last_error is not None
+        raise last_error
 
     async def start_recording(self) -> None:
         await asyncio.to_thread(self._media.start_recording)

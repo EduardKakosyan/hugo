@@ -54,6 +54,10 @@ dev = [
 # `uv sync --group robot`.
 robot = [
     "reachy_mini>=1.9",
+    # Needed for MediaBackend.SOUNDDEVICE_NO_VIDEO (see robot/reachy_client.py)
+    # — not declared as a reachy_mini dependency/extra despite that backend
+    # importing it, confirmed via a real ModuleNotFoundError on dgx1.
+    "sounddevice>=0.5",
 ]
 
 [tool.ruff]
