@@ -1,0 +1,6 @@
+# Verified working on dgx1 (aarch64, CUDA 13.0.3, Python 3.12.3): qwen-tts
+# resolves cleanly (no numpy/numba-style conflicts like deploy/stt needs).
+# Requires the `sox` system binary at runtime (apt install sox) — its
+# absence only produces a warning, not a hard failure, in the current
+# package version, but install it for full functionality.
+qwen-tts

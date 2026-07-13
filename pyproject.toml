@@ -1,0 +1,84 @@
+[project]
+name = "hugo"
+version = "0.1.0"
+description = "Voice-first embodied personal assistant running on local compute, controlling a Reachy Mini robot."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "typer>=0.15",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "openai>=1.54",
+    "httpx>=0.27",
+    "websockets>=13.1",
+    "mcp>=1.1",
+    "numpy>=1.26",
+    "openwakeword>=0.6",
+    "silero-vad>=6.2",
+    "pyaec>=1.0",
+]
+
+[project.scripts]
+hugo = "hugo.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hugo"]
+
+# openwakeword hard-depends on tflite-runtime on Linux, which has no wheels
+# for Python 3.12 at all (confirmed on dgx1, 2026-07-13) — but we only use
+# openwakeword's onnxruntime backend, which doesn't need tflite at import
+# or runtime. Override the requirement to a marker that never matches our
+# environment, so uv doesn't try to resolve/build the real package.
+[tool.uv]
+override-dependencies = ["tflite-runtime; python_version < \"3\""]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.7",
+    "mypy>=1.13",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+]
+# Heavy GPU/Linux-only model-serving deps are NOT here — each model server
+# (vLLM, STT, TTS, VLM) gets its own isolated venv on the DGX Spark instead
+# of one shared environment. See docs/adr/0005 and deploy/*/requirements.txt.
+#
+# reachy_mini runs in-process in the orchestrator (not its own subprocess —
+# it holds no significant memory), but still needs its own opt-in group:
+# it requires system packages (cairo, gobject-introspection dev headers)
+# unlikely to be present on a dev machine. Install on dgx1 with
+# `uv sync --group robot`.
+robot = [
+    "reachy_mini>=1.9",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["hugo"]
+mypy_path = "src"
+
+# Heavy GPU-only deps aren't installed on dev machines (see the `gpu`
+# dependency group) — type-check modules that use them as Any rather than
+# requiring the packages to be present just for mypy.
+[[tool.mypy.overrides]]
+module = ["nemo.*", "vllm.*", "qwen_tts.*", "reachy_mini.*", "openwakeword.*", "silero_vad.*", "pyaec.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "integration: requires real model servers / GPU hardware, not run in CI",
+]

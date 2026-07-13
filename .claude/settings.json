@@ -1,8 +1,0 @@
-{
-  "enabledPlugins": {
-    "feature-dev@claude-plugins-official": true,
-    "typescript-lsp@claude-plugins-official": true,
-    "supabase@claude-plugins-official": true,
-    "commit-commands@claude-plugins-official": true
-  }
-}

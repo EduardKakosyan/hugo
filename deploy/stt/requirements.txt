@@ -1,0 +1,6 @@
+# See docs/adr/0005 — nemo_toolkit[asr]'s dependency resolver backtracks to
+# an ancient, Python-3.12-incompatible numba/llvmlite unless numpy is pinned
+# below 2. Verified working combination on dgx1 (aarch64, CUDA 13.0.3,
+# Python 3.12.3): numba==0.66.0, llvmlite==0.48.0, numpy==1.26.4.
+nemo_toolkit[asr]
+numpy<2

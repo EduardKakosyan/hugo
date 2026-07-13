@@ -13,21 +13,13 @@ htmlcov/
 venv/
 .venv/
 
-# UV
-uv.lock
-
-# Dependencies (Node - for commitlint/husky)
-node_modules/
-.pnpm-store/
-pnpm-lock.yaml
-
 # Local env files
 .env
 .env.local
 .env.*.local
 .secrets
 
-# MLX model cache
+# Local model cache
 models/
 *.gguf
 *.safetensors
@@ -51,7 +43,6 @@ Thumbs.db
 # Build
 build/
 dist/
-*.tsbuildinfo
 
 # Misc
 *.log

@@ -1,0 +1,14 @@
+# Verified working on dgx1 (aarch64, CUDA 13.0.3, Python 3.12.3): resolves
+# to vllm==0.25.0, torch==2.11.0 (vLLM's own pin, distinct from other
+# services' torch versions — that's expected and fine, see docs/adr/0005).
+#
+# Also requires two system packages not present by default on dgx1
+# (confirmed 2026-07-13, serving a real model end-to-end):
+#   sudo apt install -y ffmpeg ninja-build
+# ffmpeg: vllm's CLI unconditionally imports torchcodec (video decoding
+#   support) at import time, even for pure text-only serving — it needs
+#   libavutil.so and friends or the CLI crashes before parsing args.
+# ninja-build: flashinfer (vLLM's sampling kernel backend) JIT-compiles a
+#   CUDA kernel via ninja on first use; without it, engine startup fails
+#   during warmup with FileNotFoundError: 'ninja'.
+vllm>=0.25
