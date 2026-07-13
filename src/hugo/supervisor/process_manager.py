@@ -29,6 +29,11 @@ class ManagedProcessSpec:
     health_check: HealthCheck | None = None
     health_check_timeout: float = 30.0
     health_check_interval: float = 0.5
+    # Extra env vars merged on top of the orchestrator's own environment
+    # (not a full replacement) — e.g. capping MAX_JOBS for vLLM's flashinfer
+    # JIT kernel compilation, which otherwise defaults to nproc parallel
+    # nvcc jobs and can OOM the system while a large model is also loading.
+    extra_env: dict[str, str] | None = None
 
 
 class HealthCheckFailed(RuntimeError):
@@ -60,7 +65,8 @@ class ProcessManager:
 
         try:
             for spec in specs:
-                proc = await asyncio.create_subprocess_exec(*spec.command)
+                env = {**os.environ, **spec.extra_env} if spec.extra_env else None
+                proc = await asyncio.create_subprocess_exec(*spec.command, env=env)
                 self._processes.append((spec.name, proc))
                 if spec.health_check is not None and not await self._wait_healthy(spec, proc):
                     raise HealthCheckFailed(spec.name)

@@ -94,6 +94,12 @@ def _build_specs(config: Config) -> list[ManagedProcessSpec]:
             # just still working). 60 minutes total budget instead.
             health_check_timeout=3600.0,
             health_check_interval=5.0,
+            # flashinfer JIT-compiles ~29 CUDA kernel variants via ninja,
+            # which defaults to nproc (20 on dgx1) parallel nvcc jobs —
+            # confirmed directly on dgx1 that this gets individual nvcc
+            # invocations OOM-killed while the ~80GB model is concurrently
+            # loading into the same unified memory pool. Capped here.
+            extra_env={"MAX_JOBS": "4"},
         ),
         ManagedProcessSpec(
             name="stt",

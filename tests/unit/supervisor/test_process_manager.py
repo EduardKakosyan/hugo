@@ -139,6 +139,55 @@ async def test_failed_health_check_tears_down_already_started_processes(
     assert manager.pidfile.read() is None
 
 
+async def test_extra_env_is_merged_onto_the_current_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # extra_env should extend, not replace, the orchestrator's own
+    # environment — e.g. capping MAX_JOBS for vLLM's flashinfer JIT
+    # compilation without losing PATH, HOME, etc.
+    monkeypatch.setenv("SOME_EXISTING_VAR", "still-here")
+    captured_env: dict[str, str] | None = None
+
+    async def fake_create_subprocess_exec(*_command: str, **kwargs: Any) -> FakeProcess:
+        nonlocal captured_env
+        captured_env = kwargs.get("env")
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        "hugo.supervisor.process_manager.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    manager = ProcessManager(pidfile=Pidfile(tmp_path / "hugo.pid"))
+    await manager.start_all(
+        [ManagedProcessSpec(name="a", command=["true"], extra_env={"MAX_JOBS": "4"})]
+    )
+
+    assert captured_env is not None
+    assert captured_env["MAX_JOBS"] == "4"
+    assert captured_env["SOME_EXISTING_VAR"] == "still-here"
+
+
+async def test_no_extra_env_leaves_env_kwarg_as_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured_kwargs: dict[str, Any] = {}
+
+    async def fake_create_subprocess_exec(*_command: str, **kwargs: Any) -> FakeProcess:
+        captured_kwargs.update(kwargs)
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        "hugo.supervisor.process_manager.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    manager = ProcessManager(pidfile=Pidfile(tmp_path / "hugo.pid"))
+    await manager.start_all([ManagedProcessSpec(name="a", command=["true"])])
+
+    assert captured_kwargs["env"] is None
+
+
 async def test_dead_process_fails_fast_instead_of_polling_full_timeout(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
