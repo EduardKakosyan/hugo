@@ -71,10 +71,21 @@ def _websocket_health_check(url: str) -> HealthCheck:
 
 
 def _build_specs(config: Config) -> list[ManagedProcessSpec]:
+    llm_port = urlsplit(config.llm_base_url).port
     return [
         ManagedProcessSpec(
             name="vllm",
-            command=[str(config.vllm_executable), "serve", config.llm_model],
+            # --port is explicit, not left to vLLM's own default — that
+            # default happens to also be 8000, which collides with the
+            # Reachy Mini daemon's own default port and caused a real
+            # "Address already in use" crash on dgx1 when this wasn't set.
+            command=[
+                str(config.vllm_executable),
+                "serve",
+                config.llm_model,
+                "--port",
+                str(llm_port),
+            ],
             health_check=_http_health_check(config.llm_base_url),
             # A ~60-70GB MoE model load is realistically minutes, not seconds.
             health_check_timeout=1800.0,

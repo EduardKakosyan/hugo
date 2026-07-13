@@ -89,8 +89,16 @@ def test_build_specs_names_and_commands(tmp_path: Path) -> None:
     assert names == ["vllm", "stt", "tts"]
 
     vllm_spec = specs[0]
-    assert vllm_spec.command[0] == str(tmp_path / ".venv-vllm" / "bin" / "vllm")
-    assert vllm_spec.command[1:3] == ["serve", config.llm_model]
+    # Explicit --port matters: relying on vLLM's own default (also 8000)
+    # caused a real "Address already in use" collision with the Reachy
+    # Mini daemon's own default port on dgx1.
+    assert vllm_spec.command == [
+        str(tmp_path / ".venv-vllm" / "bin" / "vllm"),
+        "serve",
+        config.llm_model,
+        "--port",
+        "8080",
+    ]
 
     stt_spec = specs[1]
     assert stt_spec.command == [

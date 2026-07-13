@@ -37,6 +37,13 @@ class HealthCheckFailed(RuntimeError):
         self.name = name
 
 
+class ProcessDied(RuntimeError):
+    def __init__(self, name: str, returncode: int) -> None:
+        super().__init__(f"{name} exited (code {returncode}) before becoming healthy")
+        self.name = name
+        self.returncode = returncode
+
+
 @dataclass
 class ProcessManager:
     pidfile: Pidfile
@@ -53,7 +60,7 @@ class ProcessManager:
             for spec in specs:
                 proc = await asyncio.create_subprocess_exec(*spec.command)
                 self._processes.append((spec.name, proc))
-                if spec.health_check is not None and not await self._wait_healthy(spec):
+                if spec.health_check is not None and not await self._wait_healthy(spec, proc):
                     raise HealthCheckFailed(spec.name)
         except Exception:
             await self.stop_all()
@@ -75,9 +82,19 @@ class ProcessManager:
         self._processes.clear()
         self.pidfile.remove()
 
-    async def _wait_healthy(self, spec: ManagedProcessSpec) -> bool:
+    async def _wait_healthy(
+        self, spec: ManagedProcessSpec, proc: asyncio.subprocess.Process
+    ) -> bool:
+        """Polls the health check until it passes or health_check_timeout
+        elapses. Fails fast with ProcessDied if the subprocess exits in the
+        meantime, rather than polling a dead target for the full timeout —
+        confirmed as a real gap: vLLM crashing immediately on a port
+        collision was masked by the health check innocuously 404ing against
+        an unrelated server on the same port for the full 30-minute budget."""
         deadline = asyncio.get_running_loop().time() + spec.health_check_timeout
         while asyncio.get_running_loop().time() < deadline:
+            if proc.returncode is not None:
+                raise ProcessDied(spec.name, proc.returncode)
             if await spec.health_check():  # type: ignore[misc]
                 return True
             await asyncio.sleep(spec.health_check_interval)

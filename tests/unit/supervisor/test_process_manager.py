@@ -15,7 +15,12 @@ from typing import Any
 import pytest
 
 from hugo.supervisor.pidfile import Pidfile
-from hugo.supervisor.process_manager import HealthCheckFailed, ManagedProcessSpec, ProcessManager
+from hugo.supervisor.process_manager import (
+    HealthCheckFailed,
+    ManagedProcessSpec,
+    ProcessDied,
+    ProcessManager,
+)
 
 
 class FakeProcess:
@@ -121,6 +126,46 @@ async def test_failed_health_check_tears_down_already_started_processes(
 
     assert all(proc.terminated for proc in fake_processes)
     assert manager.pidfile.read() is None
+
+
+async def test_dead_process_fails_fast_instead_of_polling_full_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Regression test for a real bug found on real hardware: vLLM crashed
+    # immediately (port collision with an unrelated server), but the health
+    # check kept innocuously polling — hitting the *other* server on the
+    # same port and getting 404s — for the full 30-minute timeout budget,
+    # never noticing the actual vLLM subprocess had already died.
+    manager = ProcessManager(pidfile=Pidfile(tmp_path / "hugo.pid"))
+
+    async def always_false_health_check() -> bool:
+        return False
+
+    async def fake_create_subprocess_exec(*_command: str, **_kwargs: object) -> FakeProcess:
+        proc = FakeProcess()
+        proc.returncode = 1  # already dead by the time health-checking starts
+        return proc
+
+    monkeypatch.setattr(
+        "hugo.supervisor.process_manager.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    with pytest.raises(ProcessDied) as exc_info:
+        await manager.start_all(
+            [
+                ManagedProcessSpec(
+                    name="crashes-immediately",
+                    command=["true"],
+                    health_check=always_false_health_check,
+                    health_check_timeout=999.0,  # would hang for ~17 min if not fixed
+                    health_check_interval=0.001,
+                )
+            ]
+        )
+
+    assert exc_info.value.name == "crashes-immediately"
+    assert exc_info.value.returncode == 1
 
 
 async def test_stop_all_terminates_in_reverse_order_then_clears_pidfile(

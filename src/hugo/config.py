@@ -22,7 +22,10 @@ class Config(BaseSettings):
     # actually in use right now.
     wake_word: str = "hey_jarvis"
 
-    llm_base_url: str = "http://127.0.0.1:8000/v1"
+    # Port 8000 is deliberately avoided — it's the Reachy Mini daemon's own
+    # default port (see robot/reachy_client.py), confirmed colliding via a
+    # real "OSError: [Errno 98] Address already in use" on dgx1.
+    llm_base_url: str = "http://127.0.0.1:8080/v1"
     llm_model: str = "nemotron-3-super-120b-a12b"
     stt_ws_url: str = "ws://127.0.0.1:8001"
     tts_ws_url: str = "ws://127.0.0.1:8002"
