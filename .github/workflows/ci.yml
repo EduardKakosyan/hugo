@@ -16,8 +16,13 @@ jobs:
         with:
           enable-cache: true
 
+      # robot (reachy_mini -> pygobject -> pycairo) needs system cairo/
+      # gobject-introspection dev headers only present on dgx1 (see
+      # docs/adr/0005 and pyproject.toml) — --all-groups pulled it in here
+      # too and broke pycairo's build on the plain ubuntu-latest runner.
+      # dev is uv's default group, so plain `uv sync` is enough for CI.
       - name: Install dependencies
-        run: uv sync --all-groups
+        run: uv sync
 
       - name: Lint (ruff check)
         run: uv run ruff check .

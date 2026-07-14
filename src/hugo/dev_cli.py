@@ -81,8 +81,7 @@ def dump_capture(seconds: float = 5.0, out_dir: str = ".") -> None:
 async def _dump_capture(seconds: float, out_dir: Path) -> None:
     robot = ReachyMiniClient()
     typer.echo(
-        f"connected: input {robot.input_sample_rate_hz}Hz, "
-        f"{robot.input_channels} channel(s)"
+        f"connected: input {robot.input_sample_rate_hz}Hz, {robot.input_channels} channel(s)"
     )
 
     raw_chunks: list[np.ndarray] = []
