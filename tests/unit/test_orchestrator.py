@@ -91,13 +91,17 @@ def test_build_specs_names_and_commands(tmp_path: Path) -> None:
     vllm_spec = specs[0]
     # Explicit --port matters: relying on vLLM's own default (also 8000)
     # caused a real "Address already in use" collision with the Reachy
-    # Mini daemon's own default port on dgx1.
+    # Mini daemon's own default port on dgx1. --gpu-memory-utilization
+    # matters too: vLLM's own default starves STT/TTS out of GPU memory
+    # afterward, confirmed via a real CUDA OOM on dgx1.
     assert vllm_spec.command == [
         str(tmp_path / ".venv-vllm" / "bin" / "vllm"),
         "serve",
         config.llm_model,
         "--port",
         "8080",
+        "--gpu-memory-utilization",
+        "0.75",
     ]
 
     stt_spec = specs[1]

@@ -85,6 +85,16 @@ def _build_specs(config: Config) -> list[ManagedProcessSpec]:
                 config.llm_model,
                 "--port",
                 str(llm_port),
+                # vLLM's default gpu_memory_utilization (~0.9) claims nearly
+                # the *entire* 121GB unified memory pool for itself (weights
+                # + KV cache) — fine for a single-model dedicated deployment,
+                # but confirmed directly on dgx1 to starve STT/TTS out of
+                # GPU memory afterward (a real CUDA OOM loading Parakeet TDT
+                # right after vLLM became healthy). 0.75 leaves ~30GB of the
+                # shared pool for STT/TTS/overhead — weights alone are
+                # ~75GB, so this still gives real KV cache headroom.
+                "--gpu-memory-utilization",
+                "0.75",
             ],
             health_check=_http_health_check(config.llm_base_url),
             # A ~80GB MoE model load is realistically minutes, not seconds —
