@@ -19,7 +19,7 @@ import typer
 
 from hugo.config import load_config
 from hugo.logging_setup import configure_logging
-from hugo.robot.reachy_client import ReachyMiniClient, _float32_to_pcm16
+from hugo.robot.reachy_client import ReachyMiniClient, _downmix_to_mono, _float32_to_pcm16
 from hugo.voice.stt import SttClient
 from hugo.voice.tts import TtsClient
 from hugo.voice.vad import SpeechActivityDetector
@@ -70,10 +70,10 @@ def dump_capture(seconds: float = 5.0, out_dir: str = ".") -> None:
     """Records N seconds via reachy_mini's own capture path and writes two
     WAV files for offline A/B comparison: the untouched multi-channel
     float32 samples exactly as the media backend returns them
-    (capture_raw.wav), and HUGO's current mono PCM16 conversion of that
-    same audio (capture_hugo_mono.wav) — isolates whether garbled/quiet
-    audio originates in reachy_mini's own capture pipeline or in HUGO's
-    downmixing (see the SUSPECTED BUG note in robot/reachy_client.py)."""
+    (capture_raw.wav), and HUGO's actual mono PCM16 conversion of that same
+    audio (capture_hugo_mono.wav, via the real downmix in
+    robot/reachy_client.py) — useful for re-verifying the capture path
+    after any future change to that conversion."""
     configure_logging(load_config().log_level)
     asyncio.run(_dump_capture(seconds, Path(out_dir)))
 
@@ -115,10 +115,10 @@ async def _dump_capture(seconds: float, out_dir: Path) -> None:
     )
     typer.echo(f"wrote {raw_path} (untouched reachy_mini output, {robot.input_channels}ch)")
 
-    mono_bytes = b"".join(_float32_to_pcm16(chunk) for chunk in raw_chunks)
+    mono_bytes = b"".join(_float32_to_pcm16(_downmix_to_mono(chunk)) for chunk in raw_chunks)
     mono_path = out_dir / "capture_hugo_mono.wav"
     _write_pcm16_wav(mono_path, mono_bytes, robot.input_sample_rate_hz, channels=1)
-    typer.echo(f"wrote {mono_path} (HUGO's current mono PCM16 conversion of the same audio)")
+    typer.echo(f"wrote {mono_path} (HUGO's actual mono PCM16 conversion of the same audio)")
 
 
 def _write_pcm16_wav(path: Path, pcm16_bytes: bytes, sample_rate_hz: int, channels: int) -> None:

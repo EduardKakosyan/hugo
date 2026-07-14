@@ -38,16 +38,19 @@ daemon keeps running in the background regardless, and a second
 correctly detects "daemon already running" and doesn't double-spawn) — so
 we retry with a delay rather than working around it more invasively.
 
-SUSPECTED BUG, not yet confirmed on hardware: the ReSpeaker mic/speaker are
-2-channel at the reachy_mini SDK level (`get_audio_sample()` returns shape
-(N, 2); `push_audio_sample()`'s pipeline sink is also 2-channel), but
-`_float32_to_pcm16`/`_pcm16_to_float32` below just flatten/treat the array
-as mono, and every downstream consumer (RobotAudioIO's own contract,
-wake_word/vad/stt) assumes mono PCM16. That would explain garbled/quiet
-audio specifically on the reachy_mini path while raw ALSA mono capture is
-clean. Use `hugo dev dump-capture` to confirm before fixing — it dumps
-both the untouched multi-channel capture and HUGO's current mono
-conversion of the same audio for offline A/B comparison.
+CONFIRMED on dgx1 (2026-07-14) via `hugo dev dump-capture` + a live A/B
+listening test: the ReSpeaker mic is 2-channel at the reachy_mini SDK level
+(`get_audio_sample()` returns shape (N, 2)), but the old `read_mic_frames()`
+just flattened that array and handed it to every mono-assuming downstream
+consumer. Byte-for-byte, channel 0 and channel 1 were identical in the
+captured WAV, so the corruption wasn't noise-like garbling — it was every
+sample duplicated back-to-back, which on playback is audibly a
+half-speed/one-octave-down version of the same audio (confirmed by ear:
+the raw 2-channel capture sounded clean, the old mono conversion of the
+exact same audio sounded slower/deeper). Fixed below by explicitly
+downmixing on capture (`_downmix_to_mono`) and upmixing on playback
+(`_upmix_mono`) using the real channel counts reported by the media
+backend, rather than assuming 1.
 """
 
 import asyncio
@@ -74,6 +77,7 @@ class ReachyMiniClient:
         self.input_sample_rate_hz: int = self._media.get_input_audio_samplerate()
         self.output_sample_rate_hz: int = self._media.get_output_audio_samplerate()
         self.input_channels: int = self._media.get_input_channels()
+        self.output_channels: int = self._media.get_output_channels()
 
     @staticmethod
     def _connect_with_retries(reachy_mini_cls: Any, use_sim: bool) -> Any:
@@ -103,7 +107,7 @@ class ReachyMiniClient:
 
     async def read_mic_frames(self) -> AsyncIterator[bytes]:
         async for sample in self._read_raw_samples():
-            yield _float32_to_pcm16(sample)
+            yield _float32_to_pcm16(_downmix_to_mono(sample))
 
     async def read_mic_frames_raw(self) -> AsyncIterator[np.ndarray]:
         """Diagnostic only: yields the exact float32 samples the reachy_mini
@@ -129,7 +133,7 @@ class ReachyMiniClient:
         await asyncio.to_thread(self._media.stop_playing)
 
     async def play_audio(self, pcm16_chunk: bytes) -> None:
-        samples = _pcm16_to_float32(pcm16_chunk)
+        samples = _upmix_mono(_pcm16_to_float32(pcm16_chunk), self.output_channels)
         await asyncio.to_thread(self._media.push_audio_sample, samples)
 
     def close(self) -> None:
@@ -144,3 +148,24 @@ def _float32_to_pcm16(samples: np.ndarray) -> bytes:
 def _pcm16_to_float32(pcm16: bytes) -> np.ndarray:
     ints = np.frombuffer(pcm16, dtype=np.int16)
     return ints.astype(np.float32) / 32768.0
+
+
+def _downmix_to_mono(samples: np.ndarray) -> np.ndarray:
+    """Averages a (N, channels) capture buffer down to mono (N,). Lossless
+    for the ReSpeaker on dgx1, whose channels were confirmed byte-identical
+    (2026-07-14) — averaging is still the correct general behavior if that
+    ever changes (e.g. a mic with genuinely distinct L/R content)."""
+    if samples.ndim == 1:
+        return samples
+    return samples.mean(axis=1).astype(np.float32)
+
+
+def _upmix_mono(samples: np.ndarray, channels: int) -> np.ndarray:
+    """Duplicates a mono (N,) playback buffer across `channels` output
+    channels, matching the shape push_audio_sample's sink actually expects
+    (see AudioBase.push_audio_sample: mono is (N,), multi-channel is
+    (N, channels)) — HUGO only ever synthesizes mono audio, so every output
+    channel gets the same content."""
+    if channels == 1:
+        return samples
+    return np.tile(samples[:, None], (1, channels))
