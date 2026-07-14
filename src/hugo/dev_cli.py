@@ -11,12 +11,15 @@ while this was written. See robot/reachy_client.py's own caveat.
 
 import asyncio
 import time
+import wave
+from pathlib import Path
 
+import numpy as np
 import typer
 
 from hugo.config import load_config
 from hugo.logging_setup import configure_logging
-from hugo.robot.reachy_client import ReachyMiniClient
+from hugo.robot.reachy_client import ReachyMiniClient, _float32_to_pcm16
 from hugo.voice.stt import SttClient
 from hugo.voice.tts import TtsClient
 from hugo.voice.vad import SpeechActivityDetector
@@ -60,6 +63,70 @@ async def _echo(seconds: float) -> None:
     await robot.stop_playing()
     robot.close()
     typer.echo("done")
+
+
+@dev_app.command("dump-capture")
+def dump_capture(seconds: float = 5.0, out_dir: str = ".") -> None:
+    """Records N seconds via reachy_mini's own capture path and writes two
+    WAV files for offline A/B comparison: the untouched multi-channel
+    float32 samples exactly as the media backend returns them
+    (capture_raw.wav), and HUGO's current mono PCM16 conversion of that
+    same audio (capture_hugo_mono.wav) — isolates whether garbled/quiet
+    audio originates in reachy_mini's own capture pipeline or in HUGO's
+    downmixing (see the SUSPECTED BUG note in robot/reachy_client.py)."""
+    configure_logging(load_config().log_level)
+    asyncio.run(_dump_capture(seconds, Path(out_dir)))
+
+
+async def _dump_capture(seconds: float, out_dir: Path) -> None:
+    robot = ReachyMiniClient()
+    typer.echo(
+        f"connected: input {robot.input_sample_rate_hz}Hz, "
+        f"{robot.input_channels} channel(s)"
+    )
+
+    raw_chunks: list[np.ndarray] = []
+    await robot.start_recording()
+    typer.echo(f"recording {seconds}s from reachy_mini's raw capture path...")
+
+    async def collect() -> None:
+        async for sample in robot.read_mic_frames_raw():
+            raw_chunks.append(sample)
+
+    collect_task = asyncio.create_task(collect())
+    await asyncio.sleep(seconds)
+    collect_task.cancel()
+    await robot.stop_recording()
+    robot.close()
+
+    if not raw_chunks:
+        typer.echo("captured 0 samples — recording produced nothing.")
+        raise typer.Exit(1)
+
+    raw = np.concatenate(raw_chunks, axis=0)
+    typer.echo(f"captured {raw.shape[0]} frames x {robot.input_channels} channel(s)")
+
+    raw_path = out_dir / "capture_raw.wav"
+    _write_pcm16_wav(
+        raw_path,
+        (np.clip(raw, -1.0, 1.0) * 32767).astype(np.int16).tobytes(),
+        robot.input_sample_rate_hz,
+        robot.input_channels,
+    )
+    typer.echo(f"wrote {raw_path} (untouched reachy_mini output, {robot.input_channels}ch)")
+
+    mono_bytes = b"".join(_float32_to_pcm16(chunk) for chunk in raw_chunks)
+    mono_path = out_dir / "capture_hugo_mono.wav"
+    _write_pcm16_wav(mono_path, mono_bytes, robot.input_sample_rate_hz, channels=1)
+    typer.echo(f"wrote {mono_path} (HUGO's current mono PCM16 conversion of the same audio)")
+
+
+def _write_pcm16_wav(path: Path, pcm16_bytes: bytes, sample_rate_hz: int, channels: int) -> None:
+    with wave.open(str(path), "wb") as wav_file:
+        wav_file.setnchannels(channels)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate_hz)
+        wav_file.writeframes(pcm16_bytes)
 
 
 @dev_app.command("listen")

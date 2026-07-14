@@ -37,6 +37,17 @@ daemon keeps running in the background regardless, and a second
 `ReachyMini(...)` call a bit later connects to it immediately (the SDK
 correctly detects "daemon already running" and doesn't double-spawn) — so
 we retry with a delay rather than working around it more invasively.
+
+SUSPECTED BUG, not yet confirmed on hardware: the ReSpeaker mic/speaker are
+2-channel at the reachy_mini SDK level (`get_audio_sample()` returns shape
+(N, 2); `push_audio_sample()`'s pipeline sink is also 2-channel), but
+`_float32_to_pcm16`/`_pcm16_to_float32` below just flatten/treat the array
+as mono, and every downstream consumer (RobotAudioIO's own contract,
+wake_word/vad/stt) assumes mono PCM16. That would explain garbled/quiet
+audio specifically on the reachy_mini path while raw ALSA mono capture is
+clean. Use `hugo dev dump-capture` to confirm before fixing — it dumps
+both the untouched multi-channel capture and HUGO's current mono
+conversion of the same audio for offline A/B comparison.
 """
 
 import asyncio
@@ -62,6 +73,7 @@ class ReachyMiniClient:
         self._media = self._robot.media
         self.input_sample_rate_hz: int = self._media.get_input_audio_samplerate()
         self.output_sample_rate_hz: int = self._media.get_output_audio_samplerate()
+        self.input_channels: int = self._media.get_input_channels()
 
     @staticmethod
     def _connect_with_retries(reachy_mini_cls: Any, use_sim: bool) -> Any:
@@ -90,12 +102,25 @@ class ReachyMiniClient:
         await asyncio.to_thread(self._media.stop_recording)
 
     async def read_mic_frames(self) -> AsyncIterator[bytes]:
+        async for sample in self._read_raw_samples():
+            yield _float32_to_pcm16(sample)
+
+    async def read_mic_frames_raw(self) -> AsyncIterator[np.ndarray]:
+        """Diagnostic only: yields the exact float32 samples the reachy_mini
+        media backend returns (shape (N, input_channels)), before HUGO's
+        mono PCM16 conversion — lets `hugo dev dump-capture` isolate
+        reachy_mini's own capture path from HUGO's downmixing when
+        debugging audio quality."""
+        async for sample in self._read_raw_samples():
+            yield sample
+
+    async def _read_raw_samples(self) -> AsyncIterator[np.ndarray]:
         while True:
             sample = await asyncio.to_thread(self._media.get_audio_sample)
             if sample is None:
                 await asyncio.sleep(POLL_INTERVAL_S)
                 continue
-            yield _float32_to_pcm16(sample)
+            yield sample
 
     async def start_playing(self) -> None:
         await asyncio.to_thread(self._media.start_playing)
