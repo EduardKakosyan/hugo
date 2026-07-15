@@ -33,8 +33,24 @@ packages = ["src/hugo"]
 # openwakeword's onnxruntime backend, which doesn't need tflite at import
 # or runtime. Override the requirement to a marker that never matches our
 # environment, so uv doesn't try to resolve/build the real package.
+#
+# onnxruntime==1.27.0 silently breaks inference on openWakeWord's pretrained
+# ONNX graphs (opset exported years ago) on macOS/Apple Silicon specifically
+# -- scores stay near-zero regardless of input instead of erroring, so
+# wake-word detection looks like it's just not triggering. Confirmed via
+# bisection against a real "hey jarvis" recording on 2026-07-15: on a Mac
+# (arm64), 1.26.0 scores true positives ~1.0, 1.27.0 scores the same audio
+# ~0.0002. The SAME audio through the SAME onnxruntime 1.27.0 on dgx1 (Linux
+# aarch64) scored ~0.999 -- no bug there. So this overrides onnxruntime only
+# on macOS dev machines; on Linux (dgx1) reachy_mini==1.9.0's own hard pin of
+# onnxruntime==1.27.0 wins undisturbed, since that's the version its FK/IK
+# kinematics and face-detection ONNX models actually ship tested against and
+# downgrading there would be an untested, unnecessary deviation.
 [tool.uv]
-override-dependencies = ["tflite-runtime; python_version < \"3\""]
+override-dependencies = [
+    "tflite-runtime; python_version < \"3\"",
+    "onnxruntime==1.26.0; sys_platform == 'darwin'",
+]
 
 [dependency-groups]
 dev = [
