@@ -21,6 +21,9 @@ class FakeRobotAudioIO:
         self._frame_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
         self.recording = False
         self.playing = False
+        self.start_playing_calls = 0
+        self.stop_playing_calls = 0
+        self.clear_playback_calls = 0
         self.played_chunks: list[bytes] = []
         self.closed = False
 
@@ -42,9 +45,14 @@ class FakeRobotAudioIO:
 
     async def start_playing(self) -> None:
         self.playing = True
+        self.start_playing_calls += 1
 
     async def stop_playing(self) -> None:
         self.playing = False
+        self.stop_playing_calls += 1
+
+    async def clear_playback(self) -> None:
+        self.clear_playback_calls += 1
 
     async def play_audio(self, pcm16_chunk: bytes) -> None:
         self.played_chunks.append(pcm16_chunk)

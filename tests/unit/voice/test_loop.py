@@ -82,6 +82,12 @@ async def test_full_happy_path_returns_to_idle() -> None:
     chime = wake_chime_pcm16(robot.output_sample_rate_hz)
     assert robot.played_chunks == [chime, b"a", b"b", b"c", b"d", b"e"]
     assert not tts.cancelled
+    # Pipeline discipline: start_playing exactly once at startup, and no
+    # stop_playing while the loop runs — reachy_mini's shared pipeline
+    # makes a mid-loop stop kill capture (see loop.py's run()).
+    assert robot.start_playing_calls == 1
+    assert robot.stop_playing_calls == 0
+    assert robot.clear_playback_calls == 0
 
 
 async def test_barge_in_cancels_tts_and_returns_to_listening() -> None:
@@ -114,6 +120,9 @@ async def test_barge_in_cancels_tts_and_returns_to_listening() -> None:
     assert tts.cancelled
     # Playback must have been cut short, not run to completion.
     assert len(robot.played_chunks) < len(slow_chunks)
+    # Interruption flushes queued audio without touching pipeline state.
+    assert robot.clear_playback_calls == 1
+    assert robot.stop_playing_calls == 0
 
 
 async def test_stuck_listening_state_does_not_crash_or_advance() -> None:

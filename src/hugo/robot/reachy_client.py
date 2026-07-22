@@ -132,6 +132,13 @@ class ReachyMiniClient:
     async def stop_playing(self) -> None:
         await asyncio.to_thread(self._media.stop_playing)
 
+    async def clear_playback(self) -> None:
+        # MediaManager doesn't proxy clear_player like it does the other
+        # audio methods (confirmed live on dgx1: AttributeError mid
+        # barge-in, 2026-07-22) — reach through its public `.audio`
+        # backend attribute instead.
+        await asyncio.to_thread(self._media.audio.clear_player)
+
     async def play_audio(self, pcm16_chunk: bytes) -> None:
         samples = _upmix_mono(_pcm16_to_float32(pcm16_chunk), self.output_channels)
         await asyncio.to_thread(self._media.push_audio_sample, samples)

@@ -28,11 +28,22 @@ handler propagates out of run()'s while loop uncaught, silently killing
 its asyncio.Task with no log line -- confirmed twice on dgx1, in two
 different states: a real 400 from vLLM (tool-calling not enabled
 server-side -- see orchestrator.py's _build_specs) from THINKING, and
-something in IDLE's own new chime playback (still being isolated) right
-after wake word detection, which measured independently (`hugo dev
-wake`) fires correctly. run() now wraps every dispatch in one catch-all
-that logs and recovers to IDLE, rather than patching each state
-individually as the next one turns up broken.
+the chime playback freeze in IDLE right after wake word detection.
+run() now wraps every dispatch in one catch-all that logs and recovers
+to IDLE, rather than patching each state individually as the next one
+turns up broken.
+
+The chime freeze itself (two real dgx1 hangs, 2026-07-16 00:45 and
+14:10) turned out not to be an exception at all: stop_playing() on
+reachy_mini's local backend sets the SINGLE shared capture+playback
+gstreamer pipeline to NULL, which with capture live either deadlocks in
+set_state or returns leaving the mic permanently dead (both reproduced
+in isolation on real hardware, 2026-07-22). The catch-all can't help
+with a blocked await, so the real fix is structural: run() owns
+start_playing exactly once at startup, playback anywhere else is a bare
+play_audio push, and barge-in flushes queued audio via clear_playback()
+-- no state handler ever touches pipeline state. See run() and
+robot/audio_io.py's clear_playback docstring.
 
 AEC is NOT wired in directly here. `SpeechDetector.feed()` is handed
 whatever mic frames the caller provides — during real wiring (M1.11), the
@@ -114,6 +125,17 @@ class VoiceLoop:
 
     async def run(self) -> None:
         await self._robot.start_recording()
+        # start_playing exactly once, up front, and never stop_playing
+        # until shutdown: reachy_mini's local backend runs capture and
+        # playback in ONE gstreamer pipeline (shared clock for AEC), and
+        # stop_playing() sets that whole pipeline to NULL. Called mid-loop
+        # with capture live it either deadlocks in set_state (both real
+        # dgx1 freezes on 2026-07-16, right after wake-word chime
+        # playback) or returns with the mic permanently dead (0 frames
+        # after, reproduced in isolation on 2026-07-22). Playback between
+        # utterances is just push_audio_sample; barge-in flushes with
+        # clear_playback() instead of stopping the pipeline.
+        await self._robot.start_playing()
         broadcaster = FrameBroadcaster(self._robot.read_mic_frames())
         broadcaster.start()
         try:
@@ -179,9 +201,7 @@ class VoiceLoop:
                 return
 
     async def _play_wake_chime(self) -> None:
-        await self._robot.start_playing()
         await self._robot.play_audio(wake_chime_pcm16(self._robot.output_sample_rate_hz))
-        await self._robot.stop_playing()
 
     async def _run_listening(self, broadcaster: FrameBroadcaster) -> str | None:
         self._vad.reset()
@@ -230,12 +250,8 @@ class VoiceLoop:
         barge_in_event = asyncio.Event()
 
         async def play() -> None:
-            await self._robot.start_playing()
-            try:
-                async for chunk in self._tts.speak(text):
-                    await self._robot.play_audio(chunk)
-            finally:
-                await self._robot.stop_playing()
+            async for chunk in self._tts.speak(text):
+                await self._robot.play_audio(chunk)
 
         async def watch_for_barge_in() -> None:
             async for frame in mic:
@@ -253,5 +269,10 @@ class VoiceLoop:
         interrupted = watch_task in done and barge_in_event.is_set()
         if interrupted:
             await self._tts.cancel()
+            # Cancelling TTS stops *generating* audio, but chunks already
+            # pushed sit in the speaker queue and would keep playing over
+            # the user — flush them. clear_playback (not stop_playing,
+            # which kills the shared capture pipeline — see run()).
+            await self._robot.clear_playback()
         await turn.cancel_all()
         return interrupted
