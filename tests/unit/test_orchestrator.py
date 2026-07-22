@@ -101,7 +101,12 @@ def test_build_specs_names_and_commands(tmp_path: Path) -> None:
         "--port",
         "8080",
         "--gpu-memory-utilization",
-        "0.75",
+        "0.65",
+        "--max-num-seqs",
+        "8",
+        "--enable-auto-tool-choice",
+        "--tool-call-parser",
+        "qwen3_coder",
     ]
 
     stt_spec = specs[1]

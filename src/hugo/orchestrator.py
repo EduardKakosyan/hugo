@@ -89,13 +89,46 @@ def _build_specs(config: Config) -> list[ManagedProcessSpec]:
                 # vLLM's default gpu_memory_utilization (~0.9) claims nearly
                 # the *entire* 121GB unified memory pool for itself (weights
                 # + KV cache) — fine for a single-model dedicated deployment,
-                # but confirmed directly on dgx1 to starve STT/TTS out of
-                # GPU memory afterward (a real CUDA OOM loading Parakeet TDT
-                # right after vLLM became healthy). 0.75 leaves ~30GB of the
-                # shared pool for STT/TTS/overhead — weights alone are
-                # ~75GB, so this still gives real KV cache headroom.
+                # but confirmed directly on dgx1 to starve STT/TTS out of GPU
+                # memory afterward (a real CUDA OOM loading Parakeet TDT
+                # right after vLLM became healthy). 0.75 (~30GB nominal
+                # headroom) was *also* confirmed directly on dgx1 to still
+                # OOM STT on 2 of 3 real restarts — vLLM's own log showed it
+                # landing right on target (69.62GiB weights + 19.56GiB KV
+                # cache + ~1GiB CUDA graph pool = ~90.2GiB, against a 90.75GiB
+                # target), so the nominal ~30GB headroom just isn't reliably
+                # free in practice (page-cache pressure from reading the
+                # 74.8GB checkpoint off disk is the leading suspect, not yet
+                # fully root-caused). 0.65 (~42GB nominal headroom) trades
+                # some KV cache size for a real safety margin.
                 "--gpu-memory-utilization",
-                "0.75",
+                "0.65",
+                # NemotronH is a hybrid Mamba/attention architecture: each
+                # concurrent sequence needs its own Mamba cache block, and
+                # vLLM's workload-derived default max_num_seqs (256, sized
+                # for multi-tenant serving) needs more blocks than 0.65
+                # utilization leaves room for — confirmed directly on dgx1,
+                # vLLM refused to start with a real, explicit ValueError
+                # ("max_num_seqs (256) exceeds available Mamba cache blocks
+                # (181)"). HUGO is single-user with one conversation in
+                # flight at a time (see CONTEXT.md/ADRs) — 256-way
+                # concurrency was never needed; 8 leaves slack for internal
+                # concurrency (e.g. a health check alongside a real turn)
+                # without hitting the Mamba cache ceiling.
+                "--max-num-seqs",
+                "8",
+                # ToolLoop (Milestone 2) sends `tools=` on every turn.
+                # Without these, vLLM rejects any request containing
+                # `tools` with a real 400 Bad Request — confirmed directly
+                # on dgx1: the very first conversation silently killed the
+                # voice loop's background task (see voice/loop.py's
+                # _run_thinking fix). qwen3_coder is NVIDIA's documented
+                # tool-call-parser for this model family, including the
+                # NVFP4 quant (vLLM's Nemotron 3 Super blog post, and the
+                # model's own HF discussions).
+                "--enable-auto-tool-choice",
+                "--tool-call-parser",
+                "qwen3_coder",
             ],
             health_check=_http_health_check(config.llm_base_url),
             # A ~80GB MoE model load is realistically minutes, not seconds —
