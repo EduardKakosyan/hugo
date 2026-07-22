@@ -2,7 +2,10 @@
 
 Runs as its own subprocess (see ADR 0002), same pattern as stt_server.py.
 
-Wire protocol (one connection = one orchestrator, one utterance at a time):
+Wire protocol (one connection = one utterance — the client dials per
+utterance and hangs up when done or barged-in; connection close is the
+server's signal to stop synthesizing. See voice/tts.py for why a shared
+long-lived connection is unsound):
   client -> server: {"type": "speak", "text": ...} starts synthesis.
   client -> server: {"type": "cancel"} aborts the utterance currently
                      streaming — required for true barge-in (ADR 0003): the
@@ -65,28 +68,39 @@ async def handle_connection(ws: ServerConnection, synthesizer: Synthesizer) -> N
     cancel_event = asyncio.Event()
     speak_task: asyncio.Task[None] | None = None
 
-    async for message in ws:
-        if not isinstance(message, str):
-            continue  # audio only flows server -> client
-        request = json.loads(message)
-        kind = request.get("type")
+    try:
+        async for message in ws:
+            if not isinstance(message, str):
+                continue  # audio only flows server -> client
+            request = json.loads(message)
+            kind = request.get("type")
 
-        if kind == "speak":
-            if speak_task is not None and not speak_task.done():
-                speak_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await speak_task
-            cancel_event = asyncio.Event()
-            speak_task = asyncio.create_task(_speak(ws, synthesizer, request["text"], cancel_event))
-        elif kind == "cancel":
-            cancel_event.set()
-        else:
-            logger.warning("tts_server: unrecognized message: %r", request)
-
-    if speak_task is not None and not speak_task.done():
-        speak_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await speak_task
+            if kind == "speak":
+                if speak_task is not None and not speak_task.done():
+                    speak_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await speak_task
+                cancel_event = asyncio.Event()
+                speak_task = asyncio.create_task(
+                    _speak(ws, synthesizer, request["text"], cancel_event)
+                )
+            elif kind == "cancel":
+                cancel_event.set()
+            else:
+                logger.warning("tts_server: unrecognized message: %r", request)
+    finally:
+        # Must run on abnormal connection death too, not just clean close:
+        # the client hangs up mid-stream as its normal barge-in path (see
+        # voice/tts.py), which lands here via ConnectionClosed rather than
+        # loop exit. Stop synthesis, and retrieve the task's exception so a
+        # send() that lost the race to the closed socket doesn't surface as
+        # "Task exception was never retrieved".
+        if speak_task is not None:
+            speak_task.cancel()
+            with contextlib.suppress(
+                asyncio.CancelledError, websockets.exceptions.ConnectionClosed
+            ):
+                await speak_task
 
 
 async def _speak(

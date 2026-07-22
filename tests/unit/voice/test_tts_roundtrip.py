@@ -3,6 +3,7 @@ localhost WebSocket, with a fake (non-GPU) synthesizer standing in for
 Qwen3-TTS. Covers the barge-in cancellation contract from ADR 0003."""
 
 import asyncio
+import contextlib
 from collections.abc import AsyncGenerator
 
 import pytest
@@ -86,7 +87,7 @@ async def test_cancel_mid_stream_stops_playback_and_closes_generator(
     assert synthesizer.chunks_yielded < 5
 
 
-async def test_second_utterance_on_same_connection_works_after_a_full_one(
+async def test_second_utterance_on_same_client_works_after_a_full_one(
     running_server: tuple[FakeSynthesizer, str],
 ) -> None:
     _synthesizer, url = running_server
@@ -96,6 +97,75 @@ async def test_second_utterance_on_same_connection_works_after_a_full_one(
         second = [chunk async for chunk in client.speak("second")]
 
     assert first == second == [f"chunk{i}".encode() for i in range(5)]
+
+
+async def test_second_utterance_streams_fully_when_first_consumer_was_task_cancelled(
+    running_server: tuple[FakeSynthesizer, str],
+) -> None:
+    """Regression for the dgx1 2026-07-22 silent-robot bug: the voice loop's
+    barge-in path task-cancels the coroutine iterating speak() (never reading
+    the server's terminal message), then starts a fresh utterance. The stale
+    terminator must not leak into — and instantly end — the next utterance,
+    and the abandoned socket must not poison the client."""
+    synthesizer, url = running_server
+
+    async with TtsClient(url) as client:
+        got_first_chunk = asyncio.Event()
+
+        async def consume_until_parked() -> None:
+            async for _ in client.speak("first"):
+                got_first_chunk.set()
+                await asyncio.sleep(3600)  # playback task parked; cancelled below
+
+        playback_task = asyncio.create_task(consume_until_parked())
+        await asyncio.wait_for(got_first_chunk.wait(), timeout=5)
+        await client.cancel()
+        playback_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await playback_task
+
+        # In the real loop, LISTENING + THINKING sit between barge-in and the
+        # next utterance — long enough for the server to acknowledge the
+        # cancel with its terminal message. Without this gap the bug hides:
+        # the next "speak" reaches the server first and task-cancels the old
+        # utterance before any stale terminator is ever sent.
+        await asyncio.sleep(0.1)
+
+        second = [chunk async for chunk in client.speak("second")]
+
+    assert second == [f"chunk{i}".encode() for i in range(5)]
+
+
+async def test_abandoning_speak_mid_stream_stops_synthesis(
+    running_server: tuple[FakeSynthesizer, str],
+) -> None:
+    """Task-cancelling the speak() consumer (barge-in) must reach the server
+    and stop the synthesizer — not leave it generating for a dead socket."""
+    synthesizer, url = running_server
+    # Lengthen the utterance so abandonment happens well before completion.
+    synthesizer._num_chunks = 100
+
+    async with TtsClient(url) as client:
+        got_first_chunk = asyncio.Event()
+
+        async def consume_until_parked() -> None:
+            async for _ in client.speak("a very long reply"):
+                got_first_chunk.set()
+                await asyncio.sleep(3600)
+
+        playback_task = asyncio.create_task(consume_until_parked())
+        await asyncio.wait_for(got_first_chunk.wait(), timeout=5)
+        playback_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await playback_task
+
+        for _ in range(100):
+            if synthesizer.closed:
+                break
+            await asyncio.sleep(0.02)
+
+    assert synthesizer.closed
+    assert synthesizer.chunks_yielded < 100
 
 
 def test_split_sentences_splits_on_terminal_punctuation() -> None:
