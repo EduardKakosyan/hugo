@@ -28,6 +28,7 @@ from collections.abc import AsyncGenerator
 
 import numpy as np
 import qwen_tts
+import torch
 
 from hugo.servers.tts_server import split_sentences
 
@@ -46,7 +47,15 @@ class QwenTtsSynthesizer:
         speaker: str = DEFAULT_SPEAKER,
         language: str = DEFAULT_LANGUAGE,
     ) -> None:
-        self._model = qwen_tts.Qwen3TTSModel.from_pretrained(model_name)
+        # device_map/dtype must be explicit: from_pretrained's default is
+        # CPU, where a single sentence takes minutes on dgx1's Grace cores
+        # (observed live 2026-07-22 — 221% CPU, 85s+ into one sentence,
+        # while every earlier "silent SPEAKING" incident traced back to
+        # exactly this). qwen_tts's own docstring names these kwargs as
+        # the intended GPU configuration.
+        self._model = qwen_tts.Qwen3TTSModel.from_pretrained(
+            model_name, device_map="cuda:0", dtype=torch.bfloat16
+        )
         self._speaker = speaker
         self._language = language
 
