@@ -6,7 +6,7 @@ as the STT/TTS "not yet verified with real audio" caveats elsewhere."""
 
 import numpy as np
 
-from hugo.voice.wake_word import WakeWordDetector
+from hugo.voice.wake_word import DEFAULT_THRESHOLD, WakeWordDetector
 
 CHUNK_SAMPLES = 1280  # openWakeWord's recommended ~80ms feed size at 16kHz
 
@@ -38,3 +38,12 @@ def test_reset_does_not_raise() -> None:
     detector.feed((np.zeros(CHUNK_SAMPLES, dtype=np.int16)).tobytes())
 
     detector.reset()  # must not raise
+
+
+def test_last_score_reflects_most_recent_feed() -> None:
+    detector = WakeWordDetector()
+    silence = (np.zeros(CHUNK_SAMPLES, dtype=np.int16)).tobytes()
+
+    detector.feed(silence)
+
+    assert 0.0 <= detector.last_score < DEFAULT_THRESHOLD

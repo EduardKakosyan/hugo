@@ -19,6 +19,21 @@ generator's `async for` returns instantly forever). Each state instead
 gets its own broadcaster.subscribe() — cancelling one subscriber doesn't
 touch the underlying pump or any other subscriber.
 
+Two things added after real dgx1 testing surfaced them: _run_idle plays a
+short confirmation chime (voice/chime.py) the instant the wake word fires,
+since without it there's no way to tell "not hearing me" apart from
+"heard me, then something downstream broke silently" -- which is exactly
+what the second addition fixes. An uncaught exception in *any* state
+handler propagates out of run()'s while loop uncaught, silently killing
+its asyncio.Task with no log line -- confirmed twice on dgx1, in two
+different states: a real 400 from vLLM (tool-calling not enabled
+server-side -- see orchestrator.py's _build_specs) from THINKING, and
+something in IDLE's own new chime playback (still being isolated) right
+after wake word detection, which measured independently (`hugo dev
+wake`) fires correctly. run() now wraps every dispatch in one catch-all
+that logs and recovers to IDLE, rather than patching each state
+individually as the next one turns up broken.
+
 AEC is NOT wired in directly here. `SpeechDetector.feed()` is handed
 whatever mic frames the caller provides — during real wiring (M1.11), the
 concrete SpeechDetector used for barge-in should be a small composite that
@@ -40,6 +55,7 @@ from typing import Literal, Protocol
 
 from hugo.robot.audio_io import RobotAudioIO
 from hugo.voice.broadcaster import FrameBroadcaster
+from hugo.voice.chime import wake_chime_pcm16
 from hugo.voice.stt import Transcript
 from hugo.voice.turn import Turn
 from hugo.voice.vad import SpeechEvent
@@ -50,6 +66,8 @@ State = Literal["IDLE", "LISTENING", "THINKING", "SPEAKING"]
 
 
 class WakeWordListener(Protocol):
+    last_score: float
+
     def feed(self, pcm16_chunk: bytes) -> bool: ...
     def reset(self) -> None: ...
 
@@ -100,32 +118,70 @@ class VoiceLoop:
         broadcaster.start()
         try:
             while True:
-                if self.state == "IDLE":
-                    await self._run_idle(broadcaster)
-                elif self.state == "LISTENING":
-                    transcript = await self._run_listening(broadcaster)
-                    if transcript:
-                        self._pending_transcript = transcript
-                        self.state = "THINKING"
-                    else:
-                        self.state = "IDLE"
-                elif self.state == "THINKING":
-                    response = await self._run_thinking(self._pending_transcript)
-                    self._pending_response = response
-                    self.state = "SPEAKING"
-                elif self.state == "SPEAKING":
-                    interrupted = await self._run_speaking(self._pending_response, broadcaster)
-                    self.state = "LISTENING" if interrupted else "IDLE"
+                try:
+                    await self._dispatch(broadcaster)
+                except Exception:
+                    # Same reasoning as _run_thinking's own catch (see the
+                    # module docstring's incident writeup), generalized to
+                    # every state: real hardware failure found live on
+                    # dgx1 in a *different* state (IDLE, playing the wake
+                    # chime) than the one already hardened -- a single
+                    # narrow catch wasn't enough. Any state handler dying
+                    # must recover to IDLE, not silently kill this task.
+                    logger.exception("unhandled error in %s state, recovering to IDLE", self.state)
+                    self.state = "IDLE"
         finally:
             await broadcaster.stop()
             await self._robot.stop_recording()
 
+    async def _dispatch(self, broadcaster: FrameBroadcaster) -> None:
+        if self.state == "IDLE":
+            await self._run_idle(broadcaster)
+        elif self.state == "LISTENING":
+            transcript = await self._run_listening(broadcaster)
+            if transcript:
+                self._pending_transcript = transcript
+                self.state = "THINKING"
+            else:
+                self.state = "IDLE"
+        elif self.state == "THINKING":
+            response = await self._run_thinking(self._pending_transcript)
+            self._pending_response = response
+            self.state = "SPEAKING"
+        elif self.state == "SPEAKING":
+            interrupted = await self._run_speaking(self._pending_response, broadcaster)
+            self.state = "LISTENING" if interrupted else "IDLE"
+
+    # Throttled diagnostic logging added live on dgx1 to answer a question
+    # `hugo dev wake` couldn't: that tool proved detection works, but only
+    # ever run with vLLM/STT/TTS stopped (idle machine) -- it says nothing
+    # about whether IDLE even sees frames, or what scores look like, once
+    # those are all competing for the same CPU/GPU during a real `hugo
+    # start` session. Every ~1s (100 frames @ ~10ms/frame) rather than
+    # per-frame, so this doesn't flood the log on its own.
+    _IDLE_LOG_EVERY_N_FRAMES = 100
+
     async def _run_idle(self, broadcaster: FrameBroadcaster) -> None:
         self._wake_word.reset()
+        frame_count = 0
         async for frame in broadcaster.subscribe():
+            frame_count += 1
+            if frame_count % self._IDLE_LOG_EVERY_N_FRAMES == 0:
+                logger.info(
+                    "IDLE: %d frames seen, last wake-word score=%.3f",
+                    frame_count,
+                    self._wake_word.last_score,
+                )
             if self._wake_word.feed(frame):
+                logger.info("wake word detected after %d frames", frame_count)
+                await self._play_wake_chime()
                 self.state = "LISTENING"
                 return
+
+    async def _play_wake_chime(self) -> None:
+        await self._robot.start_playing()
+        await self._robot.play_audio(wake_chime_pcm16(self._robot.output_sample_rate_hz))
+        await self._robot.stop_playing()
 
     async def _run_listening(self, broadcaster: FrameBroadcaster) -> str | None:
         self._vad.reset()
@@ -155,7 +211,15 @@ class VoiceLoop:
         return final_text
 
     async def _run_thinking(self, user_text: str) -> str:
-        return await self._thinker.think(user_text)
+        # Broad except is deliberate: Thinker is a swappable Protocol, and
+        # this is the system boundary that isolates the state machine from
+        # whatever it can fail with (network, model, parsing errors) -- see
+        # the module docstring for the real incident that motivated this.
+        try:
+            return await self._thinker.think(user_text)
+        except Exception:
+            logger.exception("thinker failed to produce a response")
+            return "Sorry, I ran into a problem thinking about that."
 
     async def _run_speaking(self, text: str, broadcaster: FrameBroadcaster) -> bool:
         """Returns True if barge-in interrupted playback (caller should go

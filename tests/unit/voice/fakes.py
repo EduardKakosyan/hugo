@@ -56,8 +56,10 @@ class FakeRobotAudioIO:
 class FakeWakeWordListener:
     def __init__(self) -> None:
         self.reset_count = 0
+        self.last_score = 0.0
 
     def feed(self, pcm16_chunk: bytes) -> bool:
+        self.last_score = 1.0 if pcm16_chunk == WAKE_MARKER else 0.0
         return pcm16_chunk == WAKE_MARKER
 
     def reset(self) -> None:

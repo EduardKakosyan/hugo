@@ -29,13 +29,18 @@ class WakeWordDetector:
         self._model = Model(wakeword_models=[model_name], inference_framework="onnx")
         self._model_name = model_name
         self._threshold = threshold
+        # Diagnostic hook, not used by feed()'s own return value -- lets a
+        # caller (e.g. `hugo dev wake`) observe how close a frame came to
+        # triggering, not just the thresholded bool.
+        self.last_score: float = 0.0
 
     def feed(self, pcm16_chunk: bytes) -> bool:
         """Feed one chunk of 16kHz mono int16 PCM audio. Returns True the
         moment the wake word's score crosses the detection threshold."""
         samples = np.frombuffer(pcm16_chunk, dtype=np.int16)
         scores = self._model.predict(samples)
-        return bool(scores.get(self._model_name, 0.0) >= self._threshold)
+        self.last_score = float(scores.get(self._model_name, 0.0))
+        return self.last_score >= self._threshold
 
     def reset(self) -> None:
         self._model.reset()

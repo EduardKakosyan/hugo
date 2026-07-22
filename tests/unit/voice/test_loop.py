@@ -17,6 +17,7 @@ from fakes import (
     FakeWakeWordListener,
 )
 
+from hugo.voice.chime import wake_chime_pcm16
 from hugo.voice.loop import VoiceLoop
 
 
@@ -78,7 +79,8 @@ async def test_full_happy_path_returns_to_idle() -> None:
     assert stt.ended
     assert thinker.asked == "hello hugo"
     assert tts.spoken_text == "hello there"
-    assert robot.played_chunks == [b"a", b"b", b"c", b"d", b"e"]
+    chime = wake_chime_pcm16(robot.output_sample_rate_hz)
+    assert robot.played_chunks == [chime, b"a", b"b", b"c", b"d", b"e"]
     assert not tts.cancelled
 
 
@@ -142,6 +144,91 @@ async def test_stuck_listening_state_does_not_crash_or_advance() -> None:
 
         assert loop.state == "LISTENING"
         assert thinker.asked is None
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+async def test_thinker_failure_does_not_crash_the_loop() -> None:
+    # A real 400 from vLLM (tool-calling not enabled server-side) once
+    # propagated all the way up through here uncaught, silently killing
+    # run()'s asyncio.Task -- the wake word listener never ran again for
+    # the rest of the process. This proves that class of failure now
+    # degrades to a spoken apology instead.
+    class RaisingThinker:
+        async def think(self, user_text: str) -> str:
+            raise RuntimeError("boom")
+
+    robot = FakeRobotAudioIO()
+    tts = FakeTtsSession()
+    loop = VoiceLoop(
+        robot=robot,
+        wake_word=FakeWakeWordListener(),
+        vad=FakeSpeechDetector(),
+        stt=FakeSttSession(),
+        tts=tts,
+        thinker=RaisingThinker(),  # type: ignore[arg-type]
+    )
+
+    task = asyncio.create_task(loop.run())
+    try:
+        robot.push_frame(WAKE_MARKER)
+        await _wait_until(lambda: loop.state == "LISTENING")
+
+        robot.push_frame(SPEECH_END_MARKER)
+        await _wait_until(lambda: loop.state == "SPEAKING")
+        await _wait_until(lambda: loop.state == "IDLE")
+
+        assert not task.done()
+        assert tts.spoken_text is not None
+        assert "sorry" in tts.spoken_text.lower()
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+async def test_failure_in_a_non_thinking_state_also_recovers_instead_of_crashing() -> None:
+    # A real dgx1 failure surfaced in IDLE (the new wake chime playback),
+    # not THINKING -- proving the recovery is general (run()'s own
+    # catch-all), not just something bolted onto _run_thinking specifically.
+    class FlakyPlaybackRobot(FakeRobotAudioIO):
+        def __init__(self) -> None:
+            super().__init__()
+            self.play_audio_calls = 0
+
+        async def play_audio(self, pcm16_chunk: bytes) -> None:
+            self.play_audio_calls += 1
+            if self.play_audio_calls == 1:
+                raise RuntimeError("boom")
+            await super().play_audio(pcm16_chunk)
+
+    robot = FlakyPlaybackRobot()
+    loop = VoiceLoop(
+        robot=robot,
+        wake_word=FakeWakeWordListener(),
+        vad=FakeSpeechDetector(),
+        stt=FakeSttSession(),
+        tts=FakeTtsSession(),
+        thinker=FakeThinker(),
+    )
+
+    task = asyncio.create_task(loop.run())
+    try:
+        robot.push_frame(WAKE_MARKER)
+        await _wait_until(lambda: robot.play_audio_calls == 1)
+        await _wait_until(lambda: loop.state == "IDLE")
+        assert not task.done()
+
+        # A second wake word must still work -- proves real recovery, not
+        # just "survived one crash while already broken forever after".
+        robot.push_frame(WAKE_MARKER)
+        await _wait_until(lambda: loop.state == "LISTENING")
     finally:
         task.cancel()
         try:
