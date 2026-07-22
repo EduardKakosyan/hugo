@@ -96,3 +96,28 @@ async def test_second_utterance_on_same_connection_works_after_a_full_one(
         second = [chunk async for chunk in client.speak("second")]
 
     assert first == second == [f"chunk{i}".encode() for i in range(5)]
+
+
+def test_split_sentences_splits_on_terminal_punctuation() -> None:
+    from hugo.servers.tts_server import split_sentences
+
+    assert split_sentences("Hello there. How are you? Fine!") == [
+        "Hello there.",
+        "How are you?",
+        "Fine!",
+    ]
+
+
+def test_split_sentences_passes_unpunctuated_text_through_whole() -> None:
+    from hugo.servers.tts_server import split_sentences
+
+    assert split_sentences("no punctuation at all here") == [
+        "no punctuation at all here"
+    ]
+
+
+def test_split_sentences_drops_empty_segments() -> None:
+    from hugo.servers.tts_server import split_sentences
+
+    assert split_sentences("  One.   Two.  ") == ["One.", "Two."]
+    assert split_sentences("") == []

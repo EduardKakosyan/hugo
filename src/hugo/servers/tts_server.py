@@ -23,6 +23,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 from collections.abc import AsyncGenerator, Callable
 from typing import Protocol
 
@@ -33,6 +34,23 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8002
+
+
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?;:])\s+")
+
+
+def split_sentences(text: str) -> list[str]:
+    """Splits text at sentence-ish boundaries for incremental synthesis.
+
+    Qwen3-TTS can only synthesize a full utterance in one blocking call
+    (see qwen_tts_synthesizer.py), so first-audio latency scales with the
+    length of the text handed to it. Synthesizing sentence-by-sentence
+    caps that latency at one sentence — measured live on dgx1 2026-07-22,
+    a full multi-sentence answer took minutes before its first sample,
+    which reads as HUGO simply not responding. Unpunctuated text passes
+    through whole; no worse than before.
+    """
+    return [s for s in (p.strip() for p in _SENTENCE_BOUNDARY.split(text)) if s]
 
 
 class Synthesizer(Protocol):
@@ -119,7 +137,20 @@ def main(make_synthesizer: Callable[[], Synthesizer] = _create_default_synthesiz
 
     logging.basicConfig(level=logging.INFO)
     synthesizer = make_synthesizer()
-    asyncio.run(serve(synthesizer, args.host, args.port))
+    asyncio.run(_warmup_then_serve(synthesizer, args.host, args.port))
+
+
+async def _warmup_then_serve(synthesizer: Synthesizer, host: str, port: int) -> None:
+    # One throwaway synthesis before binding the socket: the first real
+    # generate pays CUDA/JIT warmup costs (observed live on dgx1 as extra
+    # seconds of silence on HUGO's first-ever reply). The orchestrator's
+    # health check only passes once we're bound, so warmup time is covered
+    # by the tts health_check_timeout — keep those in sync.
+    logger.info("tts_server: warming up synthesizer...")
+    async for _ in synthesizer.synthesize("Ready."):
+        pass
+    logger.info("tts_server: warmup complete")
+    await serve(synthesizer, host, port)
 
 
 if __name__ == "__main__":

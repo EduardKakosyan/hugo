@@ -155,7 +155,9 @@ def _build_specs(config: Config) -> list[ManagedProcessSpec]:
             name="tts",
             command=[str(config.tts_server_python), "-m", "hugo.servers.tts_server"],
             health_check=_websocket_health_check(config.tts_ws_url),
-            health_check_timeout=120.0,
+            # Covers model load AND the pre-bind warmup synthesis the
+            # server now runs (see tts_server._warmup_then_serve).
+            health_check_timeout=240.0,
         ),
     ]
 

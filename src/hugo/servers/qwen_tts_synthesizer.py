@@ -8,15 +8,16 @@ NOT streaming at the model level: the official `qwen-tts` package's
 `non_streaming_mode` flag only simulates streaming *text input*, not
 streaming *generation* — confirmed via its own docstring on dgx1
 (2026-07-13). `generate_custom_voice()` always returns a complete
-utterance's audio in one call. We synthesize the full utterance, then chunk
-it ourselves and yield progressively, so callers still get a genuinely
-streamable, cancellable interface at the wire-protocol layer (see
-servers/tts_server.py) even though the model itself isn't chunking —
-cancellation stops further chunks being *sent*, but doesn't save the
-GPU compute already spent generating the full utterance. Swapping to a
-true streaming-capable fork (e.g. andimarafioti/faster-qwen3-tts) for
-lower first-audio latency and cancel-time compute savings is a documented
-future optimization, not needed for a correct v1.
+utterance's audio in one call. We synthesize sentence-by-sentence (see
+split_sentences in servers/tts_server.py), chunking each sentence's audio
+ourselves and yielding progressively, so callers get a genuinely
+streamable, cancellable interface at the wire-protocol layer: first audio
+after one sentence's compute rather than the whole answer's (whole-answer
+was measured in minutes of silence on dgx1, 2026-07-22), and cancellation
+between sentences skips the unspoken sentences' GPU compute. Within a
+single sentence the model call is still all-or-nothing; swapping to a
+true streaming-capable fork (e.g. andimarafioti/faster-qwen3-tts) remains
+a documented future optimization, not needed for a correct v1.
 
 VERIFIED on real hardware (dgx1, 2026-07-13): model loads, speaker/language
 lists resolve, and a real synthesis call returns float32 PCM at 24kHz.
@@ -27,6 +28,8 @@ from collections.abc import AsyncGenerator
 
 import numpy as np
 import qwen_tts
+
+from hugo.servers.tts_server import split_sentences
 
 MODEL_NAME = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
 DEFAULT_SPEAKER = "ryan"
@@ -48,9 +51,15 @@ class QwenTtsSynthesizer:
         self._language = language
 
     async def synthesize(self, text: str) -> AsyncGenerator[bytes, None]:
-        pcm = await asyncio.to_thread(self._synthesize_full, text)
-        for offset in range(0, len(pcm), CHUNK_BYTES):
-            yield pcm[offset : offset + CHUNK_BYTES]
+        # Sentence-by-sentence, not whole-utterance: generate_custom_voice
+        # is one blocking call per text it's given, so per-sentence calls
+        # cap first-audio latency at one sentence and let cancellation
+        # (generator close between yields) skip the remaining sentences'
+        # GPU compute entirely — see split_sentences' docstring.
+        for sentence in split_sentences(text):
+            pcm = await asyncio.to_thread(self._synthesize_full, sentence)
+            for offset in range(0, len(pcm), CHUNK_BYTES):
+                yield pcm[offset : offset + CHUNK_BYTES]
 
     def _synthesize_full(self, text: str) -> bytes:
         [wav], _sample_rate = self._model.generate_custom_voice(
