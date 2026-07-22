@@ -129,3 +129,14 @@ async def test_think_falls_back_after_max_tool_iterations() -> None:
     result = await loop.think("loop forever")
 
     assert "trouble" in result.lower()
+
+
+def test_speechify_strips_markdown_and_bullets() -> None:
+    from hugo.agent.tool_loop import speechify
+
+    assert speechify("**Bold** and `code` and #tag") == "Bold and code and tag"
+    assert (
+        speechify("Here you go:\n- first thing\n- second thing\n1. third")
+        == "Here you go: first thing second thing third"
+    )
+    assert speechify("  plain sentence stays put.  ") == "plain sentence stays put."

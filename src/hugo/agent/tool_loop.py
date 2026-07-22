@@ -10,6 +10,7 @@ management and the Thinker-protocol shape haven't changed from Milestone 1.
 
 import json
 import logging
+import re
 
 import httpx
 from openai.types.chat import ChatCompletionMessageParam, ChatCompletionMessageToolCallUnion
@@ -19,12 +20,39 @@ from hugo.agent.web_search import WEB_SEARCH_TOOL_SCHEMA, WebSearchTool
 
 logger = logging.getLogger(__name__)
 
+# Concrete speech rules, not just "be conversational": tried live on dgx1
+# 2026-07-22 with the one-liner version and Nemotron still produced
+# written-register answers (long, structured, markdown-inflected) that
+# sound absurd through TTS. Spell out what spoken text means.
 DEFAULT_SYSTEM_PROMPT = (
-    "You are HUGO, a helpful voice assistant. Keep responses concise and "
-    "conversational, since they will be spoken aloud."
+    "You are HUGO, a voice assistant embodied in a small desk robot. "
+    "Everything you say is spoken aloud through text-to-speech, so reply "
+    "exactly as a person talking: plain sentences with contractions, no "
+    "markdown, no bullet points, no headers, no emojis, and never read "
+    "out symbols or URLs. Lead with the answer in your first sentence. "
+    "Keep replies to one to three short sentences unless the user "
+    "explicitly asks for more detail. When you use web search, weave "
+    "what you found into a natural spoken answer and name the source "
+    "briefly rather than citing links. If you don't know something or a "
+    "search comes up empty, say so plainly."
 )
 
 _MAX_TOOL_ITERATIONS = 4
+
+_BULLET_PREFIX = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+", re.MULTILINE)
+_MARKDOWN_TOKENS = re.compile(r"[*_#`]+")
+
+
+def speechify(text: str) -> str:
+    """Best-effort scrub of written-text artifacts before TTS.
+
+    The system prompt forbids markdown, but the model still slips —
+    and through a speech synthesizer '**' and '- ' are read aloud or
+    garbled. Belt-and-suspenders, not a substitute for the prompt.
+    """
+    text = _BULLET_PREFIX.sub("", text)
+    text = _MARKDOWN_TOKENS.sub("", text)
+    return re.sub(r"\s*\n+\s*", " ", text).strip()
 
 
 class ToolLoop:
@@ -50,7 +78,7 @@ class ToolLoop:
             self._history.append(message.model_dump(exclude_none=True))  # type: ignore[arg-type]
 
             if not message.tool_calls:
-                return message.content or ""
+                return speechify(message.content or "")
 
             for tool_call in message.tool_calls:
                 result = await self._dispatch(tool_call)
