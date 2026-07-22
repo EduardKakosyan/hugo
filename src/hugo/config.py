@@ -35,6 +35,10 @@ class Config(BaseSettings):
     llm_model: str = "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
     stt_ws_url: str = "ws://127.0.0.1:8001"
     tts_ws_url: str = "ws://127.0.0.1:8002"
+    # Native output rate of the TTS model (Qwen3-TTS synthesizes at 24kHz —
+    # see servers/qwen_tts_synthesizer.py). The voice loop resamples from
+    # this to the robot's actual speaker rate (16kHz on the Reachy Mini).
+    tts_sample_rate_hz: int = 24_000
 
     # v1's only LLM tool (web search, via Tavily). Loads as HUGO_TAVILY_API_KEY
     # like everything else here, even though Tavily's own docs usually expect

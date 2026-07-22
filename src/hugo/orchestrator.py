@@ -190,6 +190,7 @@ async def run(config: Config) -> None:
         stt=stt,
         tts=tts,
         thinker=ToolLoop(llm, web_search=web_search),
+        tts_sample_rate_hz=config.tts_sample_rate_hz,
     )
 
     stop_event = asyncio.Event()

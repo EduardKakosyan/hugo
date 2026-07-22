@@ -67,6 +67,7 @@ from typing import Literal, Protocol
 from hugo.robot.audio_io import RobotAudioIO
 from hugo.voice.broadcaster import FrameBroadcaster
 from hugo.voice.chime import wake_chime_pcm16
+from hugo.voice.resample import LinearPcm16Resampler
 from hugo.voice.stt import Transcript
 from hugo.voice.turn import Turn
 from hugo.voice.vad import SpeechEvent
@@ -112,6 +113,7 @@ class VoiceLoop:
         stt: SttSession,
         tts: TtsSession,
         thinker: Thinker,
+        tts_sample_rate_hz: int = 24_000,
     ) -> None:
         self._robot = robot
         self._wake_word = wake_word
@@ -119,6 +121,10 @@ class VoiceLoop:
         self._stt = stt
         self._tts = tts
         self._thinker = thinker
+        # TTS chunks arrive at the synthesizer's native rate, the speaker
+        # runs at the robot's — _run_speaking resamples between them (see
+        # voice/resample.py for the real-hardware mismatch this fixes).
+        self._tts_sample_rate_hz = tts_sample_rate_hz
         self.state: State = "IDLE"
         self._pending_transcript: str = ""
         self._pending_response: str = ""
@@ -250,8 +256,13 @@ class VoiceLoop:
         barge_in_event = asyncio.Event()
 
         async def play() -> None:
+            resampler = LinearPcm16Resampler(
+                self._tts_sample_rate_hz, self._robot.output_sample_rate_hz
+            )
             async for chunk in self._tts.speak(text):
-                await self._robot.play_audio(chunk)
+                resampled = resampler.process(chunk)
+                if resampled:
+                    await self._robot.play_audio(resampled)
 
         async def watch_for_barge_in() -> None:
             async for frame in mic:
