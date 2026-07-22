@@ -100,3 +100,89 @@ async def test_complete_passes_model_and_stream_flag(
 
     assert calls[0]["model"] == "my-model"
     assert calls[0]["stream"] is True
+
+
+class _FakeMessage:
+    def __init__(self, content: str | None, tool_calls: list[Any] | None) -> None:
+        self.content = content
+        self.tool_calls = tool_calls
+
+
+class _FakeCompletionChoice:
+    def __init__(self, message: _FakeMessage) -> None:
+        self.message = message
+
+
+class _FakeCompletionResponse:
+    def __init__(self, message: _FakeMessage) -> None:
+        self.choices = [_FakeCompletionChoice(message)]
+
+
+class _FakeToolCompletions:
+    def __init__(self, message: _FakeMessage, calls: list[dict[str, Any]]) -> None:
+        self._message = message
+        self._calls = calls
+
+    async def create(self, **kwargs: Any) -> _FakeCompletionResponse:
+        self._calls.append(kwargs)
+        return _FakeCompletionResponse(self._message)
+
+
+class _FakeToolChat:
+    def __init__(self, completions: _FakeToolCompletions) -> None:
+        self.completions = completions
+
+
+class _FakeToolAsyncOpenAI:
+    def __init__(self, message: _FakeMessage, calls: list[dict[str, Any]]) -> None:
+        self.chat = _FakeToolChat(_FakeToolCompletions(message, calls))
+
+
+def _patch_openai_for_tools(
+    monkeypatch: pytest.MonkeyPatch, message: _FakeMessage
+) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "hugo.agent.llm_client.AsyncOpenAI",
+        lambda **_kwargs: _FakeToolAsyncOpenAI(message, calls),
+    )
+    return calls
+
+
+async def test_complete_with_tools_returns_plain_content_when_no_tool_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = _FakeMessage(content="hello!", tool_calls=None)
+    _patch_openai_for_tools(monkeypatch, message)
+    client = LlmClient(base_url="http://fake", model="test-model")
+
+    result = await client.complete_with_tools([{"role": "user", "content": "hi"}], tools=[])
+
+    assert result.content == "hello!"
+    assert result.tool_calls is None
+
+
+async def test_complete_with_tools_returns_tool_calls_when_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_tool_call = object()
+    message = _FakeMessage(content=None, tool_calls=[fake_tool_call])
+    _patch_openai_for_tools(monkeypatch, message)
+    client = LlmClient(base_url="http://fake", model="test-model")
+
+    result = await client.complete_with_tools([{"role": "user", "content": "hi"}], tools=[])
+
+    assert result.tool_calls == [fake_tool_call]
+
+
+async def test_complete_with_tools_passes_model_and_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    message = _FakeMessage(content="ok", tool_calls=None)
+    calls = _patch_openai_for_tools(monkeypatch, message)
+    client = LlmClient(base_url="http://fake", model="my-model")
+    tools: list[Any] = [{"type": "function", "function": {"name": "web_search"}}]
+
+    await client.complete_with_tools([{"role": "user", "content": "hi"}], tools=tools)
+
+    assert calls[0]["model"] == "my-model"
+    assert calls[0]["tools"] == tools
+    assert "stream" not in calls[0]

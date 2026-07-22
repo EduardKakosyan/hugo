@@ -13,7 +13,8 @@ client interface instead.
 from collections.abc import AsyncIterator
 
 from openai import AsyncOpenAI
-from openai.types.chat import ChatCompletionMessageParam
+from openai.types.chat import ChatCompletionMessageParam, ChatCompletionToolParam
+from openai.types.chat.chat_completion_message import ChatCompletionMessage
 
 DEFAULT_API_KEY = "not-needed"
 
@@ -38,3 +39,19 @@ class LlmClient:
     async def complete(self, messages: list[ChatCompletionMessageParam]) -> str:
         """Collects a full streamed response into one string."""
         return "".join([delta async for delta in self.stream(messages)])
+
+    async def complete_with_tools(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        tools: list[ChatCompletionToolParam],
+    ) -> ChatCompletionMessage:
+        """Non-streaming: reconstructing tool-call argument fragments from a
+        streamed response is real complexity that buys nothing here, since
+        the Thinker protocol this feeds (see agent/tool_loop.py) is already
+        fully blocking. One HTTP round trip per turn."""
+        response = await self._client.chat.completions.create(
+            model=self._model,
+            messages=messages,
+            tools=tools,
+        )
+        return response.choices[0].message

@@ -36,6 +36,15 @@ class Config(BaseSettings):
     stt_ws_url: str = "ws://127.0.0.1:8001"
     tts_ws_url: str = "ws://127.0.0.1:8002"
 
+    # v1's only LLM tool (web search, via Tavily). Loads as HUGO_TAVILY_API_KEY
+    # like everything else here, even though Tavily's own docs usually expect
+    # a bare TAVILY_API_KEY -- passed explicitly into WebSearchTool rather
+    # than auto-read by any SDK. Optional here (not required) so Config stays
+    # constructible for hugo dev subcommands and tests that don't touch
+    # search; orchestrator.run() fails fast on a missing key instead, since
+    # that's the only path that actually needs it.
+    tavily_api_key: str | None = None
+
     # Where the per-service venvs created by scripts/setup_service_venv.sh
     # live (see docs/adr/0005) — `hugo start` assumes it's run from the
     # repo root, matching the dev workflow (`git pull && hugo start`).

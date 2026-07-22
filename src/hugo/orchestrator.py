@@ -28,6 +28,7 @@ import websockets
 
 from hugo.agent.llm_client import LlmClient
 from hugo.agent.tool_loop import ToolLoop
+from hugo.agent.web_search import WebSearchTool
 from hugo.config import Config
 from hugo.memory.store import MemoryStore
 from hugo.robot.reachy_client import ReachyMiniClient
@@ -127,6 +128,12 @@ def _build_specs(config: Config) -> list[ManagedProcessSpec]:
 
 
 async def run(config: Config) -> None:
+    if not config.tavily_api_key:
+        raise RuntimeError(
+            "HUGO_TAVILY_API_KEY is not set — required for the web search "
+            "tool, v1's only LLM tool. Get a key at https://tavily.com."
+        )
+
     process_manager = ProcessManager(pidfile=Pidfile(config.pidfile_path))
     logger.info("starting model servers (vllm, stt, tts)...")
     await process_manager.start_all(_build_specs(config))
@@ -141,6 +148,7 @@ async def run(config: Config) -> None:
     tts = TtsClient(config.tts_ws_url)
     await tts.connect()
     llm = LlmClient(base_url=config.llm_base_url, model=config.llm_model)
+    web_search = WebSearchTool(config.tavily_api_key)
 
     voice_loop = VoiceLoop(
         robot=robot,
@@ -148,7 +156,7 @@ async def run(config: Config) -> None:
         vad=SpeechActivityDetector(),
         stt=stt,
         tts=tts,
-        thinker=ToolLoop(llm),
+        thinker=ToolLoop(llm, web_search=web_search),
     )
 
     stop_event = asyncio.Event()

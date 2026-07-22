@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 import typer
 
+from hugo.agent.web_search import WebSearchTool
 from hugo.config import load_config
 from hugo.logging_setup import configure_logging
 from hugo.robot.reachy_client import ReachyMiniClient, _downmix_to_mono, _float32_to_pcm16
@@ -128,6 +129,48 @@ def _write_pcm16_wav(path: Path, pcm16_bytes: bytes, sample_rate_hz: int, channe
         wav_file.writeframes(pcm16_bytes)
 
 
+@dev_app.command("wake")
+def wake(seconds: float = 15.0) -> None:
+    """Wake word detection only -- prints every frame's size and live
+    detection score as you speak. No VAD, no STT, no robot movement.
+    Isolates the one stage that had never been verified against a real
+    spoken wake phrase (see tests/unit/voice/test_wake_word.py's own
+    docstring) from everything downstream."""
+    configure_logging(load_config().log_level)
+    asyncio.run(_wake(seconds))
+
+
+async def _wake(seconds: float) -> None:
+    config = load_config()
+    robot = ReachyMiniClient()
+    wake_word = WakeWordDetector(model_name=config.wake_word)
+
+    await robot.start_recording()
+    typer.echo(f"listening for '{config.wake_word}' for {seconds}s...")
+
+    frame_count = 0
+    detected_count = 0
+
+    async def watch() -> None:
+        nonlocal frame_count, detected_count
+        async for frame in robot.read_mic_frames():
+            frame_count += 1
+            triggered = wake_word.feed(frame)
+            if triggered:
+                detected_count += 1
+            typer.echo(
+                f"  frame {frame_count}: {len(frame)} bytes, "
+                f"score={wake_word.last_score:.3f}, detected={triggered}"
+            )
+
+    watch_task = asyncio.create_task(watch())
+    await asyncio.sleep(seconds)
+    watch_task.cancel()
+    await robot.stop_recording()
+    robot.close()
+    typer.echo(f"done: {frame_count} frames, {detected_count} detection(s)")
+
+
 @dev_app.command("listen")
 def listen() -> None:
     """Wake-word + VAD + STT only — prints transcripts. No LLM, no TTS, no
@@ -188,6 +231,26 @@ async def _speak(text: str) -> None:
 
     await tts.close()
     robot.close()
+
+
+@dev_app.command("search")
+def search(query: str) -> None:
+    """Runs the web search tool directly against Tavily -- no LLM, no voice
+    loop. Verifies HUGO_TAVILY_API_KEY and the Tavily integration in
+    isolation."""
+    configure_logging(load_config().log_level)
+    asyncio.run(_search(query))
+
+
+async def _search(query: str) -> None:
+    config = load_config()
+    if not config.tavily_api_key:
+        typer.echo("HUGO_TAVILY_API_KEY is not set.")
+        raise typer.Exit(1)
+
+    tool = WebSearchTool(config.tavily_api_key)
+    result = await tool.search(query)
+    typer.echo(result)
 
 
 @dev_app.command("bargein")
