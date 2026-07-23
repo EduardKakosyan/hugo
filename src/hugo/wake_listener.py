@@ -28,6 +28,8 @@ import contextlib
 import logging
 import math
 import subprocess
+import wave
+from pathlib import Path
 
 import numpy as np
 
@@ -36,6 +38,7 @@ from hugo.logging_setup import configure_logging
 from hugo.robot.audio_io import RobotAudioIO
 from hugo.voice.chime import wake_chime_pcm16
 from hugo.voice.loop import WakeWordListener
+from hugo.voice.resample import StreamingPcm16Resampler
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +56,32 @@ _POLL_INTERVAL_S = 5.0
 _ASLEEP_WAKE_THRESHOLD = 0.35
 
 
+# Pre-rendered "On my way. Give me a few minutes to warm up." in HUGO's
+# own voice (rendered once via the live TTS stack, 2026-07-23). Played the
+# moment the wake word fires from sleep: no models are loaded at that
+# point, so it cannot be synthesized live — and a lone chime followed by
+# minutes of silent loading was misread as "it won't wake up" twice in one
+# day, with the wake word having actually fired within seconds both times.
+_WAKE_ACK_WAV = Path(__file__).parent / "voice" / "assets" / "waking_up.wav"
+
+
+def _load_wake_ack_pcm(output_rate_hz: int) -> bytes | None:
+    """The ack clip as PCM16 mono at the robot's speaker rate, or None if
+    the asset is missing/unreadable (chime-only degradation, never fatal)."""
+    try:
+        with wave.open(str(_WAKE_ACK_WAV), "rb") as f:
+            if f.getnchannels() != 1 or f.getsampwidth() != 2:
+                raise wave.Error(f"expected mono PCM16, got {f.getparams()}")
+            rate = f.getframerate()
+            pcm = f.readframes(f.getnframes())
+    except (OSError, wave.Error):
+        logger.exception("wake ack clip unusable (%s); falling back to chime only", _WAKE_ACK_WAV)
+        return None
+    if rate == output_rate_hz:
+        return pcm
+    return StreamingPcm16Resampler(rate, output_rate_hz).process(pcm)
+
+
 def _peak_dbfs(frame: bytes, current_peak: float) -> float:
     samples = np.frombuffer(frame, dtype=np.int16).astype(np.float32) / 32768.0
     if not samples.size:
@@ -61,8 +90,14 @@ def _peak_dbfs(frame: bytes, current_peak: float) -> float:
     return max(current_peak, 20.0 * math.log10(rms + 1e-9))
 
 
-async def listen_until_wake(robot: RobotAudioIO, wake_word: WakeWordListener) -> None:
-    """Consumes mic frames until the wake word fires, then chimes."""
+async def listen_until_wake(
+    robot: RobotAudioIO,
+    wake_word: WakeWordListener,
+    ack_pcm16: bytes | None = None,
+) -> None:
+    """Consumes mic frames until the wake word fires, then chimes and (if
+    provided) speaks the pre-rendered ack. Both drain through the speaker
+    before this returns — the caller releases media right after."""
     wake_word.reset()
     frame_count = 0
     peak_score = 0.0
@@ -90,7 +125,11 @@ async def listen_until_wake(robot: RobotAudioIO, wake_word: WakeWordListener) ->
         if fired:
             logger.info("wake word heard while asleep")
             await robot.play_audio(wake_chime_pcm16(robot.output_sample_rate_hz))
-            await asyncio.sleep(_CHIME_DRAIN_S)
+            drain_s = _CHIME_DRAIN_S
+            if ack_pcm16 is not None:
+                await robot.play_audio(ack_pcm16)
+                drain_s += len(ack_pcm16) / (2 * robot.output_sample_rate_hz)
+            await asyncio.sleep(drain_s)
             return
 
 
@@ -130,7 +169,11 @@ async def _listen_while_hugo_down(config: Config) -> bool:
     wake_word = WakeWordDetector(model_name=config.wake_word, threshold=_ASLEEP_WAKE_THRESHOLD)
     await robot.start_recording()
     await robot.start_playing()
-    listen_task = asyncio.ensure_future(listen_until_wake(robot, wake_word))
+    listen_task = asyncio.ensure_future(
+        listen_until_wake(
+            robot, wake_word, ack_pcm16=_load_wake_ack_pcm(robot.output_sample_rate_hz)
+        )
+    )
     hugo_up_task = asyncio.ensure_future(_wait_until_hugo_up())
     try:
         logger.info("asleep and listening — say '%s' to wake hugo", config.wake_word)
