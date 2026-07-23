@@ -40,8 +40,24 @@ _POLL_INTERVAL_S = 5.0
 async def listen_until_wake(robot: RobotAudioIO, wake_word: WakeWordListener) -> None:
     """Consumes mic frames until the wake word fires, then chimes."""
     wake_word.reset()
+    frame_count = 0
+    peak_score = 0.0
     async for frame in robot.read_mic_frames():
-        if wake_word.feed(frame):
+        fired = wake_word.feed(frame)
+        peak_score = max(peak_score, wake_word.last_score)
+        frame_count += 1
+        # Same telemetry the voice loop's IDLE state has: without it, "said
+        # the wake word, nothing happened" is undiagnosable — no way to
+        # tell a dead mic (frames stop) from a low score (live user
+        # report, 2026-07-23).
+        if frame_count % 500 == 0:
+            logger.info(
+                "asleep: %d frames seen, peak wake score %.3f over last ~5s",
+                frame_count,
+                peak_score,
+            )
+            peak_score = 0.0
+        if fired:
             logger.info("wake word heard while asleep")
             await robot.play_audio(wake_chime_pcm16(robot.output_sample_rate_hz))
             await asyncio.sleep(_CHIME_DRAIN_S)
