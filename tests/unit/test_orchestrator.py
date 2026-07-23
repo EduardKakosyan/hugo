@@ -120,6 +120,8 @@ def test_build_specs_stages_stt_and_tts_before_vllm(tmp_path: Path) -> None:
         '{"method": "mtp", "num_speculative_tokens": 3, "moe_backend": "triton"}',
         "--load-format",
         "runai_streamer",
+        "--model-loader-extra-config",
+        '{"concurrency": 8, "memory_limit": 4294967296}',
     ]
     assert vllm_spec.extra_env is not None
     assert vllm_spec.extra_env["VLLM_NVFP4_GEMM_BACKEND"] == "marlin"

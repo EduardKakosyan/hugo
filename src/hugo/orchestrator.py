@@ -192,6 +192,15 @@ def _build_specs(config: Config) -> list[list[ManagedProcessSpec]]:
                 # vllm[runai] extra (see deploy/vllm/requirements.txt).
                 "--load-format",
                 "runai_streamer",
+                # The staging buffer MUST be bounded on unified memory:
+                # left unlimited, the MTP drafter's second streaming pass
+                # (with ~70GB of target weights already resident) killed
+                # the EngineCore silently at 17% with throughput collapsing
+                # 3373->390 it/s — classic memory-exhaustion death, seen
+                # live on dgx1 2026-07-23. 4GiB staging + bounded
+                # concurrency keeps the second pass inside the pool.
+                "--model-loader-extra-config",
+                '{"concurrency": 8, "memory_limit": 4294967296}',
             ],
             health_check=_http_health_check(config.llm_base_url),
             # A ~80GB MoE model load is realistically minutes, not seconds —
