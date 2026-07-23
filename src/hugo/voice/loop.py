@@ -143,6 +143,7 @@ class VoiceLoop:
         sleep_phrases: Sequence[str] = SLEEP_PHRASES,
         on_sleep: Callable[[], None] | None = None,
         startup_announcement: str | None = None,
+        interrupt_wake_score: float = 0.35,
     ) -> None:
         self._robot = robot
         self._wake_word = wake_word
@@ -162,6 +163,7 @@ class VoiceLoop:
         self._sleep_phrases = frozenset(normalize_command(p) for p in sleep_phrases)
         self._on_sleep = on_sleep
         self._startup_announcement = startup_announcement
+        self._interrupt_wake_score = interrupt_wake_score
 
         self.state: State = "IDLE"
         self._pending_transcript: str = ""
@@ -391,8 +393,22 @@ class VoiceLoop:
                 await self._speak(utterance)
 
         async def watch_for_wake_interrupt() -> None:
+            # A lower bar than IDLE's detection threshold: HUGO's own
+            # speech is blasting from a speaker centimeters from the mic
+            # (no AEC), so a genuine "hey jarvis" scores far below its
+            # quiet-room value — at the stock 0.5, barge-in effectively
+            # never fired (live user report, 2026-07-23). Peak scores are
+            # logged so the threshold can be tuned from the journal.
+            frame_count = 0
+            peak_score = 0.0
             async for frame in mic:
-                if self._wake_word.feed(frame):
+                fired = self._wake_word.feed(frame)
+                peak_score = max(peak_score, self._wake_word.last_score)
+                frame_count += 1
+                if frame_count % 200 == 0:  # ~2s of ~10ms frames
+                    logger.info("RESPONDING: peak wake score %.3f over last ~2s", peak_score)
+                    peak_score = 0.0
+                if fired or self._wake_word.last_score >= self._interrupt_wake_score:
                     interrupted_event.set()
                     return
 

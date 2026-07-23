@@ -291,6 +291,14 @@ async def run(config: Config) -> None:
         await memory_store.initialize()
 
         robot = await robot_task
+        # Physically stand up before speaking: the motors stay in rest
+        # posture from the last sleep otherwise, and a slumped robot reads
+        # as 'asleep' regardless of what the voice does. Best-effort — a
+        # motor fault must not block the voice stack.
+        try:
+            await robot.wake_up()
+        except Exception:
+            logger.exception("failed to stand the robot up; continuing")
         stt = SttClient(config.stt_ws_url)
         await stt.connect()
         tts = TtsClient(config.tts_ws_url)
@@ -326,6 +334,7 @@ async def run(config: Config) -> None:
             progress_update_after_s=config.progress_update_after_s,
             stop_phrases=config.stop_phrases,
             sleep_phrases=config.sleep_phrases,
+            interrupt_wake_score=config.interrupt_wake_score,
             # Spoken "go to sleep" and `hugo sleep`'s SIGTERM converge on
             # the same graceful shutdown below (CONTEXT.md: Sleep).
             on_sleep=stop_event.set,

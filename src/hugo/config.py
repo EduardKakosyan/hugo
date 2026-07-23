@@ -49,6 +49,13 @@ class Config(BaseSettings):
     follow_up_window_s: float = 6.0
     max_utterance_s: float = 30.0
     progress_update_after_s: float = 8.0
+    # Wake-word score that interrupts HUGO mid-speech. Lower than the
+    # idle detection threshold (0.5): the speaker is centimeters from the
+    # mic with no AEC, so a real "hey jarvis" scores lower during
+    # playback. Tune against the "RESPONDING: peak wake score" journal
+    # lines.
+    interrupt_wake_score: float = 0.35
+
     stop_phrases: list[str] = [
         "stop",
         "that's all",

@@ -154,6 +154,13 @@ class ReachyMiniClient:
         the physical cue that HUGO is off (VEN-56; CONTEXT.md: Sleep)."""
         await asyncio.to_thread(self._robot.goto_sleep)
 
+    async def wake_up(self) -> None:
+        """Stands the robot back up from rest posture. Without this every
+        start after a sleep left HUGO talking while physically slumped —
+        which reads as 'still asleep' no matter what the voice does
+        (live user report, 2026-07-23)."""
+        await asyncio.to_thread(self._robot.wake_up)
+
     def close(self) -> None:
         self._robot.release_media()
 
