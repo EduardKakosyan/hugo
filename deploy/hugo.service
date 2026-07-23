@@ -1,0 +1,29 @@
+# HUGO systemd user service (VEN-56 ops). Install with
+# scripts/install_systemd_service.sh, then:
+#
+#   systemctl --user start hugo      # load models, start the voice loop
+#   systemctl --user stop hugo       # graceful sleep: rest posture + full teardown
+#   journalctl --user -u hugo -f     # live logs, persistent across restarts
+#
+# One-time on a fresh machine: `loginctl enable-linger` so the service
+# survives SSH logout. Deliberately NO Restart= — a crashed HUGO must
+# release the shared box's memory, not fight to reclaim it (ADR 0002).
+
+[Unit]
+Description=HUGO voice assistant (model servers + voice loop)
+
+[Service]
+Type=simple
+WorkingDirectory=%h/hugo
+# Plain KEY=VALUE lines (no `export` — systemd doesn't parse it):
+# HUGO_TAVILY_API_KEY, HUGO_PLAYBACK_GAIN, and any other HUGO_* overrides.
+EnvironmentFile=%h/.hugo_secrets
+ExecStart=%h/hugo/.venv/bin/hugo start
+# SIGTERM is hugo's graceful sleep path (CONTEXT.md: Sleep). Model
+# teardown takes tens of seconds; give it room before systemd escalates.
+KillSignal=SIGTERM
+TimeoutStopSec=180
+Restart=no
+
+[Install]
+WantedBy=default.target

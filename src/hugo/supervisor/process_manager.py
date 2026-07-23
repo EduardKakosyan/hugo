@@ -71,7 +71,14 @@ class ProcessManager:
         back to back), and the next stage starts only once the whole stage
         is healthy. Tears down everything already started if anything
         fails, so a partial start never leaks subprocesses (ADR 0002)."""
-        os.setpgid(0, 0)
+        try:
+            os.setpgid(0, 0)
+        except PermissionError:
+            # EPERM means we're a session leader (systemd service, setsid
+            # wrapper — a real crash on dgx1, 2026-07-23). A session
+            # leader is already its own process-group leader, which is
+            # all this needs.
+            pass
         self._pgid = os.getpgrp()
         self.pidfile.write(self._pgid)
 

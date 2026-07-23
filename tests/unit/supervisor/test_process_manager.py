@@ -90,6 +90,23 @@ async def test_start_all_writes_pgid_to_pidfile(
     assert manager.pidfile.read() == 4242
 
 
+async def test_start_all_tolerates_already_being_a_session_leader(
+    tmp_path: Path, fake_processes: list[FakeProcess], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Under systemd (or any setsid wrapper) the process is a session
+    # leader and setpgid(0, 0) raises EPERM — a real dgx1 crash. A session
+    # leader is already its own group leader, so startup must proceed.
+    def raise_eperm(pid: int, pgid: int) -> None:
+        raise PermissionError("Operation not permitted")
+
+    monkeypatch.setattr("hugo.supervisor.process_manager.os.setpgid", raise_eperm)
+    manager = ProcessManager(pidfile=Pidfile(tmp_path / "hugo.pid"))
+
+    await manager.start_all([ManagedProcessSpec(name="a", command=["true"])])
+
+    assert manager.pidfile.read() == 4242
+
+
 async def test_start_all_waits_for_health_check_to_pass(
     tmp_path: Path, fake_processes: list[FakeProcess]
 ) -> None:
