@@ -69,6 +69,15 @@ TICK_S = 0.04  # 25Hz
 NEUTRAL_ANTENNAS = (-0.1745, 0.1745)
 NEUTRAL_HEAD = HeadOffsets()
 
+# Rest-posture correction: the SDK sleep pose drops the head 44mm onto the
+# body, right over the mic ports — with the head fully folded, the sleeping
+# ear's wake scores collapsed to ~0.02 for real speech while in-session
+# detection heard the same voice at 0.5+ ("no way of waking it up", live
+# 2026-07-23). After the SDK fold, the head eases back up to here: still
+# slumped and clearly asleep (nose down 24°, antennas stay folded), but the
+# mics stay in the clear.
+SLEEP_EAR_OPEN_HEAD = HeadOffsets(x_m=-0.01, z_m=-0.02, pitch_rad=math.radians(24))
+
 # Attentive perk: slight rise and nose-up, antennas nearly vertical.
 ATTENTIVE_HEAD = HeadOffsets(z_m=0.004, pitch_rad=math.radians(-4))
 ATTENTIVE_ANTENNAS = (-0.06, 0.06)

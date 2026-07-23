@@ -31,7 +31,7 @@ from hugo.agent.tool_loop import ToolLoop
 from hugo.agent.web_search import WebSearchTool
 from hugo.config import Config
 from hugo.memory.store import MemoryStore
-from hugo.robot.motion import MotionManager
+from hugo.robot.motion import SLEEP_EAR_OPEN_HEAD, MotionManager
 from hugo.robot.reachy_client import ReachyMiniClient
 from hugo.supervisor.page_cache import evict_directory_from_page_cache, hf_model_cache_dir
 from hugo.supervisor.pidfile import Pidfile
@@ -377,6 +377,10 @@ async def run(config: Config) -> None:
         # the memory-release guarantee (ADR 0002).
         try:
             await robot.goto_sleep()
+            # The SDK fold buries the mics; ease the head half-way back up
+            # so the sleeping ear can still hear the wake word (see
+            # SLEEP_EAR_OPEN_HEAD's story).
+            await robot.goto(SLEEP_EAR_OPEN_HEAD, None, 1.0)
         except Exception:
             logger.exception("failed to move robot to rest posture")
         robot.close()

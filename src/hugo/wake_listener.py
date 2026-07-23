@@ -26,7 +26,10 @@ the physical "load done" cue (VEN-57 as revised).
 import asyncio
 import contextlib
 import logging
+import math
 import subprocess
+
+import numpy as np
 
 from hugo.config import Config, load_config
 from hugo.logging_setup import configure_logging
@@ -41,27 +44,49 @@ logger = logging.getLogger(__name__)
 _CHIME_DRAIN_S = 0.6
 _POLL_INTERVAL_S = 5.0
 
+# Lower than the in-session 0.5: even with the ear-open rest posture
+# (SLEEP_EAR_OPEN_HEAD — the SDK's full fold buried the mics and scores
+# collapsed to ~0.02, live 2026-07-23), the slumped head hears somewhat
+# worse than the upright one. The asleep ambient noise floor measured
+# 0.000-0.04, so 0.35 keeps a wide margin against false wakes — and a
+# false wake only costs a model load and an "I'm awake".
+_ASLEEP_WAKE_THRESHOLD = 0.35
+
+
+def _peak_dbfs(frame: bytes, current_peak: float) -> float:
+    samples = np.frombuffer(frame, dtype=np.int16).astype(np.float32) / 32768.0
+    if not samples.size:
+        return current_peak
+    rms = float(np.sqrt(np.mean(samples * samples)))
+    return max(current_peak, 20.0 * math.log10(rms + 1e-9))
+
 
 async def listen_until_wake(robot: RobotAudioIO, wake_word: WakeWordListener) -> None:
     """Consumes mic frames until the wake word fires, then chimes."""
     wake_word.reset()
     frame_count = 0
     peak_score = 0.0
+    peak_level_dbfs = -120.0
     async for frame in robot.read_mic_frames():
         fired = wake_word.feed(frame)
         peak_score = max(peak_score, wake_word.last_score)
+        peak_level_dbfs = _peak_dbfs(frame, peak_level_dbfs)
         frame_count += 1
         # Same telemetry the voice loop's IDLE state has: without it, "said
         # the wake word, nothing happened" is undiagnosable — no way to
         # tell a dead mic (frames stop) from a low score (live user
-        # report, 2026-07-23).
+        # report, 2026-07-23). The input level separates "mic capturing
+        # but muffled/quiet" (the sleep-posture incident, same day) from
+        # "model just not firing".
         if frame_count % 500 == 0:
             logger.info(
-                "asleep: %d frames seen, peak wake score %.3f over last ~5s",
+                "asleep: %d frames seen, peak wake score %.3f, peak level %.0f dBFS over last ~5s",
                 frame_count,
                 peak_score,
+                peak_level_dbfs,
             )
             peak_score = 0.0
+            peak_level_dbfs = -120.0
         if fired:
             logger.info("wake word heard while asleep")
             await robot.play_audio(wake_chime_pcm16(robot.output_sample_rate_hz))
@@ -102,7 +127,7 @@ async def _listen_while_hugo_down(config: Config) -> bool:
     from hugo.voice.wake_word import WakeWordDetector
 
     robot = ReachyMiniClient(playback_gain=config.playback_gain)
-    wake_word = WakeWordDetector(model_name=config.wake_word)
+    wake_word = WakeWordDetector(model_name=config.wake_word, threshold=_ASLEEP_WAKE_THRESHOLD)
     await robot.start_recording()
     await robot.start_playing()
     listen_task = asyncio.ensure_future(listen_until_wake(robot, wake_word))
