@@ -120,23 +120,19 @@ def _build_specs(config: Config) -> list[list[ManagedProcessSpec]]:
                 config.llm_model,
                 "--port",
                 str(llm_port),
-                # vLLM's default gpu_memory_utilization (~0.9) claims nearly
-                # the *entire* 121GB unified memory pool for itself (weights
-                # + KV cache) — fine for a single-model dedicated deployment,
-                # but confirmed directly on dgx1 to starve STT/TTS out of GPU
-                # memory afterward (a real CUDA OOM loading Parakeet TDT
-                # right after vLLM became healthy). 0.75 (~30GB nominal
-                # headroom) was *also* confirmed directly on dgx1 to still
-                # OOM STT on 2 of 3 real restarts — vLLM's own log showed it
-                # landing right on target (69.62GiB weights + 19.56GiB KV
-                # cache + ~1GiB CUDA graph pool = ~90.2GiB, against a 90.75GiB
-                # target), so the nominal ~30GB headroom just isn't reliably
-                # free in practice (page-cache pressure from reading the
-                # 74.8GB checkpoint off disk is the leading suspect, not yet
-                # fully root-caused). 0.65 (~42GB nominal headroom) trades
-                # some KV cache size for a real safety margin.
+                # History: 0.75 OOMed STT on 2 of 3 restarts when STT
+                # loaded AFTER vLLM (page cache from the 74.8GB checkpoint
+                # read — since root-caused and fixed by eviction), so 0.65
+                # was chosen defensively. The staged startup inverts the
+                # order (STT/TTS resident BEFORE vLLM profiles), which
+                # retires that failure mode — and 0.65 proved too tight
+                # live on 2026-07-23: weights + MTP drafter ≈ 75GB against
+                # a 78.6GB budget left the KV pool at the mercy of
+                # page-cache noise (engine init failed twice). 0.72 ≈
+                # 87GB budget → ~12GB KV pool, with stt+tts+system ≈ 10GB
+                # outside it and ~24GB true slack on the 121GB pool.
                 "--gpu-memory-utilization",
-                "0.65",
+                "0.72",
                 # NemotronH is a hybrid Mamba/attention architecture: each
                 # concurrent sequence needs its own Mamba cache block, and
                 # vLLM's workload-derived default max_num_seqs (256, sized
@@ -261,7 +257,11 @@ async def run(config: Config) -> None:
         checkpoint_dir = hf_model_cache_dir(config.llm_model)
         while True:
             await asyncio.to_thread(evict_directory_from_page_cache, checkpoint_dir)
-            await asyncio.sleep(15.0)
+            # The streamer reads at ~4GB/s — a 15s sweep interval let tens
+            # of GB of cache accumulate between sweeps and vLLM profiled
+            # inside a dirty window (live failure #2). Sweep aggressively;
+            # each sweep is a cheap fadvise walk over 17 files.
+            await asyncio.sleep(5.0)
 
     eviction_task = asyncio.create_task(keep_checkpoint_out_of_page_cache())
     try:

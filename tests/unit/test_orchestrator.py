@@ -106,7 +106,7 @@ def test_build_specs_stages_stt_and_tts_before_vllm(tmp_path: Path) -> None:
         "--port",
         "8080",
         "--gpu-memory-utilization",
-        "0.65",
+        "0.72",
         "--max-num-seqs",
         "8",
         "--enable-auto-tool-choice",
