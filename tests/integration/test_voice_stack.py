@@ -131,6 +131,108 @@ async def test_tts_first_audio_latency(config: Config) -> None:
         await ws.close()
 
 
+class _StubWebSearch:
+    """Real Tavily isn't under test (and needs a key); the LLM+ToolLoop
+    behavior is."""
+
+    async def search(self, query: str) -> str:
+        return f"stub result for: {query}"
+
+
+async def test_live_reply_to_what_can_you_do_sounds_like_a_person(config: Config) -> None:
+    """The live conversational-quality check (VEN-56): the reply to a
+    trivial question must be a short spoken-register answer — not the
+    reasoning trace, not a recitation of the system prompt, not markdown —
+    and its first utterance must arrive in conversational time. Runs
+    entirely in code: no mic, no speaker, no human."""
+    await _require_llm(config)
+    from hugo.agent.tool_loop import ToolLoop
+
+    llm = LlmClient(base_url=config.llm_base_url, model=config.llm_model)
+    loop = ToolLoop(llm, web_search=_StubWebSearch())  # type: ignore[arg-type]
+
+    started = time.monotonic()
+    first_utterance_at: float | None = None
+    utterances: list[str] = []
+    async for utterance in loop.think("What can you do?"):
+        if first_utterance_at is None:
+            first_utterance_at = time.monotonic() - started
+        utterances.append(utterance)
+    total_s = time.monotonic() - started
+
+    reply = " ".join(utterances)
+    print(f"\nreply ({first_utterance_at:.2f}s to first utterance, {total_s:.2f}s total): {reply}")
+
+    assert reply.strip(), "empty reply"
+    # Spoken register: speechify strips markdown, but the model shouldn't
+    # be producing it in the first place with the voice system prompt.
+    assert not any(token in reply for token in ("**", "##", "```", "http://", "https://"))
+    # Not the reasoning trace: the classic trace tells that were being
+    # spoken aloud before the reasoning parser was configured.
+    lowered = reply.lower()
+    for trace_tell in ("<think", "the user asks", "the user wants", "we need to respond"):
+        assert trace_tell not in lowered, f"reasoning-trace tell in spoken reply: {trace_tell!r}"
+    # Not parroting its own instructions (distinctive system-prompt span).
+    assert "no bullet points" not in lowered
+    # Short enough to be a spoken answer, not an essay.
+    assert len(reply.split()) < 120, f"reply too long to speak: {len(reply.split())} words"
+    # Conversational: the PRD budget is ~3s to first *audio*; the text
+    # feeding it must arrive faster still. 8s is the generous ceiling
+    # before this fails as a regression.
+    assert first_utterance_at is not None and first_utterance_at < 8.0
+
+
+async def test_full_cascade_round_trip_no_human_required(config: Config) -> None:
+    """The whole cascade in code (VEN-56): TTS speaks 'What can you do?',
+    STT transcribes that audio back, the LLM answers the transcript —
+    proving the three real models actually compose, with no human and no
+    robot in the loop."""
+    await _require_llm(config)
+    await _require_ws(config.tts_ws_url)
+    await _require_ws(config.stt_ws_url)
+    from hugo.agent.tool_loop import ToolLoop
+    from hugo.voice.loop import normalize_command
+    from hugo.voice.resample import LinearPcm16Resampler
+    from hugo.voice.stt import SttClient
+    from hugo.voice.tts import TtsClient
+
+    # 1. HUGO's own voice asks the question.
+    tts = TtsClient(config.tts_ws_url)
+    spoken_pcm = b""
+    async for chunk in tts.speak("What can you do?"):
+        spoken_pcm += chunk
+    assert len(spoken_pcm) > 0, "TTS produced no audio"
+
+    # 2. The robot's mic runs at 16kHz — resample exactly as the loop does.
+    resampler = LinearPcm16Resampler(config.tts_sample_rate_hz, 16_000)
+    mic_pcm = resampler.process(spoken_pcm)
+
+    # 3. STT hears it.
+    async with SttClient(config.stt_ws_url) as stt:
+        for offset in range(0, len(mic_pcm), 3200):
+            await stt.send_audio(mic_pcm[offset : offset + 3200])
+        await stt.end_utterance()
+        transcript = ""
+        async for t in stt.transcripts():
+            if t.kind == "final":
+                transcript = t.text
+    print(f"\ncascade transcript: {transcript!r}")
+    assert "what can you do" in normalize_command(transcript), (
+        f"STT did not recover the spoken question: {transcript!r}"
+    )
+
+    # 4. The LLM answers what STT heard.
+    llm = LlmClient(base_url=config.llm_base_url, model=config.llm_model)
+    loop = ToolLoop(llm, web_search=_StubWebSearch())  # type: ignore[arg-type]
+    utterances = [u async for u in loop.think(transcript)]
+    reply = " ".join(utterances)
+    print(f"cascade reply: {reply}")
+    assert reply.strip()
+    assert "sorry" not in reply.lower() or "problem" not in reply.lower(), (
+        "cascade degraded to the failure apology"
+    )
+
+
 async def test_stt_finalizes_within_budget(config: Config) -> None:
     await _require_ws(config.stt_ws_url)
     sample_rate = 16_000
