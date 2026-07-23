@@ -53,6 +53,12 @@ played. The loop tracks an estimated playback deadline (sum of pushed chunk
 durations) and waits it out before opening the follow-up window — without
 this, the open mic hears the tail of HUGO's own reply (no AEC) and
 transcribes it as a bogus follow-up turn.
+
+Motion cues (VEN-57): conversation-state transitions are mirrored to an
+optional on_motion_cue callback (wake / listening / user_speech_start /
+thinking / speaking / conversation_end) so the motion layer can act them
+out. Fire-and-forget and exception-shielded — body language must never
+take the voice pipeline down.
 """
 
 import asyncio
@@ -64,6 +70,7 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from typing import Literal, Protocol
 
 from hugo.robot.audio_io import RobotAudioIO
+from hugo.robot.motion_io import MotionCue
 from hugo.voice.broadcaster import FrameBroadcaster
 from hugo.voice.chime import conversation_end_chime_pcm16, wake_chime_pcm16
 from hugo.voice.resample import StreamingPcm16Resampler
@@ -142,6 +149,7 @@ class VoiceLoop:
         stop_phrases: Sequence[str] = STOP_PHRASES,
         sleep_phrases: Sequence[str] = SLEEP_PHRASES,
         on_sleep: Callable[[], None] | None = None,
+        on_motion_cue: Callable[[MotionCue], None] | None = None,
         startup_announcement: str | None = None,
         interrupt_wake_score: float = 0.35,
     ) -> None:
@@ -162,6 +170,7 @@ class VoiceLoop:
         self._stop_phrases = frozenset(normalize_command(p) for p in stop_phrases)
         self._sleep_phrases = frozenset(normalize_command(p) for p in sleep_phrases)
         self._on_sleep = on_sleep
+        self._on_motion_cue = on_motion_cue
         self._startup_announcement = startup_announcement
         self._interrupt_wake_score = interrupt_wake_score
 
@@ -212,6 +221,7 @@ class VoiceLoop:
     async def _dispatch(self, broadcaster: FrameBroadcaster) -> None:
         if self.state == "IDLE":
             await self._run_idle(broadcaster)
+            self._cue("wake")
             await self._play(wake_chime_pcm16(self._robot.output_sample_rate_hz))
             self._listening_is_follow_up = False
             self.state = "LISTENING"
@@ -220,14 +230,30 @@ class VoiceLoop:
             await self._route_transcript(transcript)
         elif self.state == "RESPONDING":
             interrupted = await self._run_responding(self._pending_transcript, broadcaster)
+            # Leave RESPONDING before any confirmation chime: _play treats
+            # audio pushed while RESPONDING as the response's first audio
+            # (the "speaking" motion cue + the latency log), and the
+            # barge-in chime is not that.
+            self.state = "LISTENING"
             if interrupted:
                 # The user said the wake word to cut HUGO off — same audible
                 # confirmation as a fresh wake, then a full listening window.
+                self._cue("wake")
                 await self._play(wake_chime_pcm16(self._robot.output_sample_rate_hz))
                 self._listening_is_follow_up = False
             else:
+                self._cue("listening")
                 self._listening_is_follow_up = True
-            self.state = "LISTENING"
+
+    def _cue(self, cue: MotionCue) -> None:
+        # Motion is a cosmetic layer: a broken cue handler must never take
+        # the voice pipeline down with it.
+        if self._on_motion_cue is None:
+            return
+        try:
+            self._on_motion_cue(cue)
+        except Exception:
+            logger.exception("motion cue %r handler failed; continuing", cue)
 
     async def _route_transcript(self, transcript: str | None) -> None:
         # Transcripts are logged deliberately (single-user desk robot):
@@ -251,6 +277,7 @@ class VoiceLoop:
         self.state = "RESPONDING"
 
     async def _end_conversation(self) -> None:
+        self._cue("conversation_end")
         await self._play(conversation_end_chime_pcm16(self._robot.output_sample_rate_hz))
         self.state = "IDLE"
 
@@ -317,6 +344,9 @@ class VoiceLoop:
                     pre_roll.append(frame)
                     if self._vad.feed(frame) == "speech_start":
                         speech_started.set()
+                        # Freeze the body while the user talks (VEN-57):
+                        # servo noise into the open mic degrades STT.
+                        self._cue("user_speech_start")
                         for buffered in pre_roll:
                             await self._stt.send_audio(buffered)
                         pre_roll.clear()
@@ -351,6 +381,9 @@ class VoiceLoop:
                 with contextlib.suppress(asyncio.CancelledError):
                     await feed_task
             await self._stt.end_utterance()
+            # The visible-latency window opens here (STT finalize + LLM):
+            # the thinking cue fills it with motion instead of a freeze.
+            self._cue("thinking")
             self._end_of_speech_at = asyncio.get_running_loop().time()
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(transcript_task, timeout=5.0)
@@ -468,6 +501,7 @@ class VoiceLoop:
         self._last_audio_pushed_at = now
         if self.state == "RESPONDING" and self._first_audio_at is None:
             self._first_audio_at = now
+            self._cue("speaking")
             if self._end_of_speech_at is not None:
                 transcript_s = (self._transcript_at or now) - self._end_of_speech_at
                 logger.info(

@@ -55,11 +55,14 @@ backend, rather than assuming 1.
 
 import asyncio
 import logging
+import math
 import time
 from collections.abc import AsyncIterator
 from typing import Any
 
 import numpy as np
+
+from hugo.robot.motion_io import HeadOffsets
 
 logger = logging.getLogger(__name__)
 
@@ -161,8 +164,72 @@ class ReachyMiniClient:
         (live user report, 2026-07-23)."""
         await asyncio.to_thread(self._robot.wake_up)
 
+    # --- RobotMotion (VEN-57): motor commands ride the daemon's WebSocket
+    # control channel, independent of the media pipeline above, so these
+    # are safe to issue while capture/playback is live.
+
+    async def set_motion_target(
+        self, head: HeadOffsets | None, antennas: tuple[float, float] | None
+    ) -> None:
+        await asyncio.to_thread(
+            self._robot.set_target,
+            head=None if head is None else _head_pose_matrix(head),
+            antennas=None if antennas is None else list(antennas),
+        )
+
+    async def goto(
+        self,
+        head: HeadOffsets | None,
+        antennas: tuple[float, float] | None,
+        duration_s: float,
+    ) -> None:
+        await asyncio.to_thread(
+            self._robot.goto_target,
+            head=None if head is None else _head_pose_matrix(head),
+            antennas=None if antennas is None else list(antennas),
+            duration=duration_s,
+            # The SDK default is 0.0 which COMMANDS zero body yaw; None
+            # means keep the current yaw, which is what a head/antenna
+            # transition wants.
+            body_yaw=None,
+        )
+
+    async def hold_current_head_pose(self) -> None:
+        def _hold() -> None:
+            self._robot.set_target(head=self._robot.get_current_head_pose())
+
+        await asyncio.to_thread(_hold)
+
+    async def enable_wobbling(self) -> None:
+        await asyncio.to_thread(self._robot.enable_wobbling)
+
+    async def disable_wobbling(self) -> None:
+        await asyncio.to_thread(self._robot.disable_wobbling)
+
+    async def set_head_tracking(self, weight: float) -> None:
+        await asyncio.to_thread(self._robot.start_head_tracking, weight)
+
+    async def stop_head_tracking(self) -> None:
+        await asyncio.to_thread(self._robot.stop_head_tracking)
+
     def close(self) -> None:
         self._robot.release_media()
+
+
+def _head_pose_matrix(offsets: HeadOffsets) -> np.ndarray:
+    """4x4 head pose from neutral-relative offsets, matching the SDK's
+    frame (x forward, y left, z up; INIT_HEAD_POSE is identity):
+    R = Rz(yaw) @ Ry(pitch) @ Rx(roll), translation in meters."""
+    cr, sr = math.cos(offsets.roll_rad), math.sin(offsets.roll_rad)
+    cp, sp = math.cos(offsets.pitch_rad), math.sin(offsets.pitch_rad)
+    cy, sy = math.cos(offsets.yaw_rad), math.sin(offsets.yaw_rad)
+    rx = np.array([[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]])
+    ry = np.array([[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]])
+    rz = np.array([[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]])
+    pose = np.eye(4)
+    pose[:3, :3] = rz @ ry @ rx
+    pose[:3, 3] = (offsets.x_m, offsets.y_m, offsets.z_m)
+    return pose
 
 
 # Where the saturation curve starts. Below the knee the signal is
