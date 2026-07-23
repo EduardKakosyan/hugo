@@ -9,18 +9,19 @@ from collections.abc import Callable
 from hugo.robot.motion import (
     ATTENTIVE_ANTENNAS,
     ATTENTIVE_HEAD,
+    MAX_ANTENNA_PER_TICK_RAD,
     MAX_ROTATION_PER_TICK_RAD,
     NEUTRAL_ANTENNAS,
     NEUTRAL_HEAD,
     NEUTRAL_RETURN_S,
     PERK_DURATION_S,
     MotionManager,
-    MotionState,
     antennas_if_changed,
     head_if_changed,
+    slew_limited_antennas,
     slew_limited_head,
 )
-from hugo.robot.motion_io import HeadOffsets, MotionCue
+from hugo.robot.motion_io import HeadOffsets
 
 Call = tuple[object, ...]
 
@@ -76,19 +77,34 @@ async def _settled_call_count(robot: FakeRobotMotion, ticks: float = 0.1) -> int
     return len(robot.calls) - before
 
 
-def _build() -> tuple[MotionManager, FakeRobotMotion]:
+def _build(
+    use_wobbler: bool = False, use_head_tracking: bool = False
+) -> tuple[MotionManager, FakeRobotMotion]:
     robot = FakeRobotMotion()
-    return MotionManager(robot, tick_s=0.005), robot
+    manager = MotionManager(
+        robot, tick_s=0.005, use_wobbler=use_wobbler, use_head_tracking=use_head_tracking
+    )
+    return manager, robot
 
 
-async def test_start_enables_wobbling_and_idles_perfectly_still() -> None:
+async def test_default_start_touches_nothing_and_idles_perfectly_still() -> None:
     manager, robot = _build()
     await manager.start()
     try:
-        assert robot.calls[0] == ("enable_wobbling",)
-        # Idle means STILL (VEN-57 as revised): motion is communication,
-        # not ambient decoration — zero motor traffic until a conversation.
+        # Wobbler and tracking are opt-in (both produced wild motion on
+        # this hardware), and idle means STILL: zero motor traffic until
+        # a conversation.
         assert await _settled_call_count(robot) == 0
+        assert robot.calls == []
+    finally:
+        await manager.stop()
+
+
+async def test_wobbler_is_enabled_only_when_opted_in() -> None:
+    manager, robot = _build(use_wobbler=True)
+    await manager.start()
+    try:
+        assert robot.calls[0] == ("enable_wobbling",)
     finally:
         await manager.stop()
 
@@ -103,8 +119,24 @@ async def test_stop_disables_wobbling_and_tracking() -> None:
     assert await _settled_call_count(robot) == 0
 
 
-async def test_wake_perks_then_tracks_then_holds_still() -> None:
+async def test_wake_perks_then_holds_still_without_tracking() -> None:
     manager, robot = _build()
+    await manager.start()
+    try:
+        manager.cue("wake")
+        await _wait_until(lambda: manager.state == "attentive")
+
+        perk = ("goto", ATTENTIVE_HEAD, ATTENTIVE_ANTENNAS, PERK_DURATION_S)
+        assert perk in robot.calls
+        assert ("tracking", 1.0) not in robot.calls
+        # Attentive = stillness: no procedural targets while listening.
+        assert await _settled_call_count(robot) == 0
+    finally:
+        await manager.stop()
+
+
+async def test_wake_perks_before_handing_the_head_to_tracking() -> None:
+    manager, robot = _build(use_head_tracking=True)
     await manager.start()
     try:
         manager.cue("wake")
@@ -115,14 +147,12 @@ async def test_wake_perks_then_tracks_then_holds_still() -> None:
         # Perk before tracking: once tracking owns the head, the perk
         # would never show.
         assert perk_at < tracking_at
-        # Attentive = stillness: no procedural targets while listening.
-        assert await _settled_call_count(robot) == 0
     finally:
         await manager.stop()
 
 
 async def test_user_speech_holds_pose_then_pauses_tracking() -> None:
-    manager, robot = _build()
+    manager, robot = _build(use_head_tracking=True)
     await manager.start()
     try:
         manager.cue("wake")
@@ -139,26 +169,54 @@ async def test_user_speech_holds_pose_then_pauses_tracking() -> None:
         await manager.stop()
 
 
-async def test_thinking_and_speaking_move_antennas_only() -> None:
+async def test_thinking_sways_one_antenna_and_never_the_head() -> None:
     manager, robot = _build()
     await manager.start()
     try:
         manager.cue("wake")
         await _wait_until(lambda: manager.state == "attentive")
-        cues: list[tuple[MotionCue, MotionState]] = [
-            ("thinking", "thinking"),
-            ("speaking", "speaking"),
-        ]
-        for cue, state in cues:
-            before = len(robot.targets())
-            manager.cue(cue)
-            await _wait_until(lambda state=state: manager.state == state)
-            await _wait_until(lambda before=before: len(robot.targets()) >= before + 2)
-            for _, head, antennas in robot.targets()[before:]:
-                # The head belongs to the held anchor (+ the daemon's
-                # wobbler while speaking) — only antennas move.
-                assert head is None
-                assert antennas is not None
+        before = len(robot.targets())
+        manager.cue("thinking")
+        await _wait_until(lambda: len(robot.targets()) >= before + 2)
+        for _, head, antennas in robot.targets()[before:]:
+            assert head is None
+            assert antennas is not None
+    finally:
+        await manager.stop()
+
+
+async def test_speaking_nods_the_head_and_wags_antennas() -> None:
+    manager, robot = _build()
+    await manager.start()
+    try:
+        manager.cue("wake")
+        await _wait_until(lambda: manager.state == "attentive")
+        before = len(robot.targets())
+        manager.cue("speaking")
+        # With tracking off the head is ours: the gentle nod must show up
+        # alongside the wag (our controllable stand-in for the wobbler).
+        await _wait_until(lambda: any(head is not None for _, head, _ in robot.targets()[before:]))
+        await _wait_until(
+            lambda: len({antennas for _, _, antennas in robot.targets()[before:]}) >= 2
+        )
+    finally:
+        await manager.stop()
+
+
+async def test_speaking_with_tracking_leaves_the_head_anchored() -> None:
+    manager, robot = _build(use_head_tracking=True)
+    await manager.start()
+    try:
+        manager.cue("wake")
+        await _wait_until(lambda: manager.state == "attentive")
+        manager.cue("user_speech_start")
+        await _wait_until(lambda: manager.state == "user_speech_hold")
+        before = len(robot.targets())
+        manager.cue("speaking")
+        await _wait_until(lambda: len(robot.targets()) >= before + 2)
+        for _, head, _antennas in robot.targets()[before:]:
+            # The head stays on the face anchor; only antennas move.
+            assert head is None
     finally:
         await manager.stop()
 
@@ -172,14 +230,26 @@ async def test_conversation_end_settles_to_neutral_then_stillness() -> None:
         manager.cue("conversation_end")
         await _wait_until(lambda: manager.state == "idle")
 
+        assert ("goto", NEUTRAL_HEAD, NEUTRAL_ANTENNAS, NEUTRAL_RETURN_S) in robot.calls
+        # Settled means settled: no further motor traffic while idle.
+        assert await _settled_call_count(robot) == 0
+    finally:
+        await manager.stop()
+
+
+async def test_conversation_end_stops_tracking_before_the_neutral_goto() -> None:
+    manager, robot = _build(use_head_tracking=True)
+    await manager.start()
+    try:
+        manager.cue("wake")
+        await _wait_until(lambda: manager.state == "attentive")
+        manager.cue("conversation_end")
+        await _wait_until(lambda: manager.state == "idle")
+
         neutral_goto = ("goto", NEUTRAL_HEAD, NEUTRAL_ANTENNAS, NEUTRAL_RETURN_S)
-        assert ("stop_tracking",) in robot.calls
-        assert neutral_goto in robot.calls
         # Tracking off before the neutral goto, or the goto's head
         # component is fought by the tracker.
         assert robot.calls.index(("stop_tracking",)) < robot.calls.index(neutral_goto)
-        # Settled means settled: no further motor traffic while idle.
-        assert await _settled_call_count(robot) == 0
     finally:
         await manager.stop()
 
@@ -222,3 +292,9 @@ def test_slew_limit_caps_a_violent_swing() -> None:
     assert limited.yaw_rad == MAX_ROTATION_PER_TICK_RAD
     # Unknown last pose: nothing to slew against.
     assert slew_limited_head(None, HeadOffsets(yaw_rad=1.0)) == HeadOffsets(yaw_rad=1.0)
+
+
+def test_antenna_slew_eases_state_change_snaps() -> None:
+    eased = slew_limited_antennas((-0.06, 0.06), (-0.5, 0.06))
+    assert eased == (-0.06 - MAX_ANTENNA_PER_TICK_RAD, 0.06)
+    assert slew_limited_antennas(None, (-0.5, 0.06)) == (-0.5, 0.06)

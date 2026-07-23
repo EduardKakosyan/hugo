@@ -6,14 +6,24 @@ Maps conversation state (cues from the voice loop) to expressive motion:
                       ambient decoration (live user feedback 2026-07-23:
                       idle breathing read as senseless movement; HUGO
                       only moves when listening/thinking/speaking)
-    attentive         perk (goto) then hold still; face tracking active
-    user_speech_hold  frozen: pose held, tracking paused at weight 0
+    attentive         perk (goto) then hold still
+    user_speech_hold  frozen while the user talks
     thinking          subtle one-antenna sway filling STT+LLM latency
-    speaking          antenna wag; head = held anchor + the SDK's wobbler
+    speaking          antenna wag + a gentle procedural head nod
 
 Amplitudes are deliberately small: the ecosystem-canonical values were
 tried live and read as far too much motion on a desk at arm's length —
 current values are roughly half or less (same feedback session).
+
+The daemon's built-in wobbler and face tracking are OFF by default
+(use_wobbler/use_head_tracking): both were tried live (2026-07-23) and
+produced wild, uncontrollable movement — tracking ran BLIND because this
+install's camera path is broken (unixfdsrc is an unpackaged Rust
+GStreamer plugin, like the known webrtcsink gap) and swung the head at
+garbage targets, and the wobbler's amplitudes are SDK-fixed (yaw 7.5°,
+×1.5 gain) with our boosted playback gain pinning its loudness envelope
+near max. Re-enable tracking only after the camera demonstrably works;
+re-enable the wobbler only with a gain we control (port speech_tapper).
 
 Hard rules encoded here — every one is a documented Reachy Mini hardware
 failure mode (VEN-57 research, 2026-07-23), not taste:
@@ -72,9 +82,11 @@ THINKING_ANTENNA_CENTER_RAD = -0.2
 THINKING_ANTENNA_AMPLITUDE_RAD = math.radians(3)
 THINKING_ANTENNA_FREQ_HZ = 0.4
 
-# Speaking wag: brisk but small, on top of the attentive pose.
+# Speaking: brisk but small antenna wag + a gentle head nod around the
+# attentive pose (our own controllable stand-in for the SDK wobbler).
 WAG_AMPLITUDE_RAD = math.radians(5)
 WAG_FREQ_HZ = 1.2
+SPEAK_NOD_AMPLITUDE_RAD = math.radians(1.5)
 
 # Send-deadband and slew limits (community-measured values).
 TRANSLATION_DEADBAND_M = 0.0005
@@ -82,6 +94,7 @@ ROTATION_DEADBAND_RAD = math.radians(0.35)
 ANTENNA_DEADBAND_RAD = math.radians(1.5)
 MAX_TRANSLATION_PER_TICK_M = 0.005
 MAX_ROTATION_PER_TICK_RAD = math.radians(2.0)
+MAX_ANTENNA_PER_TICK_RAD = math.radians(3.0)
 
 _ERROR_LOG_INTERVAL_S = 5.0
 
@@ -122,6 +135,19 @@ def head_if_changed(last: HeadOffsets | None, desired: HeadOffsets) -> HeadOffse
     return None if translations_close and rotations_close else desired
 
 
+def slew_limited_antennas(
+    last: tuple[float, float] | None, desired: tuple[float, float]
+) -> tuple[float, float]:
+    """Caps antenna target jumps per tick so state changes ease in
+    instead of snapping (an instant 8° droop read as a twitch live)."""
+    if last is None:
+        return desired
+    return (
+        _clamped(desired[0], last[0], MAX_ANTENNA_PER_TICK_RAD),
+        _clamped(desired[1], last[1], MAX_ANTENNA_PER_TICK_RAD),
+    )
+
+
 def antennas_if_changed(
     last: tuple[float, float] | None, desired: tuple[float, float]
 ) -> tuple[float, float] | None:
@@ -141,9 +167,19 @@ class MotionManager:
     and this task applies them — entry transitions first, then the per-state
     procedural layer at tick rate."""
 
-    def __init__(self, robot: RobotMotion, tick_s: float = TICK_S) -> None:
+    def __init__(
+        self,
+        robot: RobotMotion,
+        tick_s: float = TICK_S,
+        use_wobbler: bool = False,
+        use_head_tracking: bool = False,
+    ) -> None:
         self._robot = robot
         self._tick_s = tick_s
+        # Daemon built-ins, off by default — see the module docstring for
+        # the live failure that parked them.
+        self._use_wobbler = use_wobbler
+        self._use_head_tracking = use_head_tracking
         self.state: MotionState = "idle"
         self._pending_cue: MotionCue | None = None
         self._cue_event = asyncio.Event()
@@ -154,20 +190,20 @@ class MotionManager:
         self._last_error_logged_at = 0.0
 
     async def start(self) -> None:
-        # Wobbling is a robot-level toggle, on for the manager's lifetime:
-        # it only moves the head while speaker audio actually plays, so
-        # there is nothing to gate. Best-effort — cosmetic motion must
-        # never block startup.
-        try:
-            await self._robot.enable_wobbling()
-        except Exception:
-            logger.exception("enabling speech wobble failed; continuing without it")
+        if self._use_wobbler:
+            # Best-effort — cosmetic motion must never block startup.
+            try:
+                await self._robot.enable_wobbling()
+            except Exception:
+                logger.exception("enabling speech wobble failed; continuing without it")
         self._phase_started_at = asyncio.get_running_loop().time()
         self._task = asyncio.create_task(self._run())
 
     async def stop(self) -> None:
         """Stops commanding motors (so shutdown's goto_sleep isn't fought
-        by a breathing tick) and turns the daemon toggles back off."""
+        by a motion tick) and turns the daemon toggles back off. The
+        toggle-offs run unconditionally: they also clear state a previous
+        (differently-configured) run may have left enabled in the daemon."""
         if self._task is not None:
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -212,27 +248,31 @@ class MotionManager:
     async def _enter(self, cue: MotionCue) -> None:
         now = asyncio.get_running_loop().time()
         if cue == "wake":
-            # Perk first, then hand the head to tracking — the other way
-            # round, tracking owns the head and the perk never shows.
+            # Perk first, then (if enabled) hand the head to tracking —
+            # the other way round, tracking owns the head and the perk
+            # never shows.
             await self._robot.goto(ATTENTIVE_HEAD, ATTENTIVE_ANTENNAS, PERK_DURATION_S)
             self._sent_head, self._sent_antennas = ATTENTIVE_HEAD, ATTENTIVE_ANTENNAS
-            await self._robot.set_head_tracking(1.0)
+            if self._use_head_tracking:
+                await self._robot.set_head_tracking(1.0)
             self.state = "attentive"
         elif cue == "listening":
             # Follow-up window reopening: no re-perk, just settle the
-            # antennas out of the speaking wag and resume gaze corrections.
+            # antennas out of the speaking wag (and resume gaze corrections
+            # when tracking is on).
             await self._robot.goto(None, ATTENTIVE_ANTENNAS, REJOIN_DURATION_S)
             self._sent_antennas = ATTENTIVE_ANTENNAS
-            await self._robot.set_head_tracking(1.0)
+            if self._use_head_tracking:
+                await self._robot.set_head_tracking(1.0)
             self.state = "attentive"
         elif cue == "user_speech_start":
-            # Freeze: hold the head where tracking aimed it (the anchor —
-            # also where the head stays pointed while speaking), then pause
-            # tracking so its corrections stop making servo noise into the
-            # open mic.
-            await self._robot.hold_current_head_pose()
-            self._sent_head = None
-            await self._robot.set_head_tracking(0.0)
+            if self._use_head_tracking:
+                # Freeze: hold the head where tracking aimed it (the
+                # anchor), then pause tracking so its corrections stop
+                # making servo noise into the open mic.
+                await self._robot.hold_current_head_pose()
+                self._sent_head = None
+                await self._robot.set_head_tracking(0.0)
             self.state = "user_speech_hold"
         elif cue == "thinking":
             self._phase_started_at = now
@@ -241,7 +281,8 @@ class MotionManager:
             self._phase_started_at = now
             self.state = "speaking"
         elif cue == "conversation_end":
-            await self._robot.stop_head_tracking()
+            if self._use_head_tracking:
+                await self._robot.stop_head_tracking()
             await self._robot.goto(NEUTRAL_HEAD, NEUTRAL_ANTENNAS, NEUTRAL_RETURN_S)
             self._sent_head, self._sent_antennas = NEUTRAL_HEAD, NEUTRAL_ANTENNAS
             self._phase_started_at = now
@@ -259,20 +300,32 @@ class MotionManager:
                 ),
             )
         elif self.state == "speaking":
-            wag = WAG_AMPLITUDE_RAD * math.sin(2 * math.pi * WAG_FREQ_HZ * t)
-            await self._send(None, (ATTENTIVE_ANTENNAS[0] + wag, ATTENTIVE_ANTENNAS[1] + wag))
+            phase = math.sin(2 * math.pi * WAG_FREQ_HZ * t)
+            wag = WAG_AMPLITUDE_RAD * phase
+            head: HeadOffsets | None = None
+            if not self._use_head_tracking:
+                # With tracking off the head is ours: a gentle nod around
+                # the attentive pose, amplitude we control — the stand-in
+                # for the SDK wobbler (whose gains are fixed and read as
+                # wild on this robot, live 2026-07-23).
+                head = HeadOffsets(
+                    z_m=ATTENTIVE_HEAD.z_m,
+                    pitch_rad=ATTENTIVE_HEAD.pitch_rad + SPEAK_NOD_AMPLITUDE_RAD * phase,
+                )
+            await self._send(head, (ATTENTIVE_ANTENNAS[0] + wag, ATTENTIVE_ANTENNAS[1] + wag))
         # "idle", "attentive" and "user_speech_hold" deliberately send
         # nothing: stillness is the behavior (and while attentive/held the
-        # head belongs to tracking or the held anchor).
+        # head belongs to the perk pose, tracking, or the held anchor).
 
     async def _send(self, head: HeadOffsets | None, antennas: tuple[float, float] | None) -> None:
         head_to_send: HeadOffsets | None = None
         if head is not None:
             limited = slew_limited_head(self._sent_head, head)
             head_to_send = head_if_changed(self._sent_head, limited)
-        antennas_to_send = (
-            None if antennas is None else antennas_if_changed(self._sent_antennas, antennas)
-        )
+        antennas_to_send: tuple[float, float] | None = None
+        if antennas is not None:
+            eased = slew_limited_antennas(self._sent_antennas, antennas)
+            antennas_to_send = antennas_if_changed(self._sent_antennas, eased)
         if head_to_send is None and antennas_to_send is None:
             return
         await self._robot.set_motion_target(head_to_send, antennas_to_send)
