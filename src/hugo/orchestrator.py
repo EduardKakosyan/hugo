@@ -212,59 +212,67 @@ async def run(config: Config) -> None:
     await process_manager.start_all(_build_specs(config))
     logger.info("model servers healthy")
 
-    memory_store = MemoryStore(config.memory_db_path)
-    await memory_store.initialize()
-
-    robot = ReachyMiniClient(playback_gain=config.playback_gain)
-    stt = SttClient(config.stt_ws_url)
-    await stt.connect()
-    tts = TtsClient(config.tts_ws_url)
-    await tts.connect()
-    llm = LlmClient(base_url=config.llm_base_url, model=config.llm_model)
-    web_search = WebSearchTool(config.tavily_api_key)
-
-    stop_event = asyncio.Event()
-
-    voice_loop = VoiceLoop(
-        robot=robot,
-        wake_word=WakeWordDetector(model_name=config.wake_word),
-        vad=SpeechActivityDetector(),
-        stt=stt,
-        tts=tts,
-        thinker=ToolLoop(llm, web_search=web_search),
-        tts_sample_rate_hz=config.tts_sample_rate_hz,
-        no_speech_timeout_s=config.no_speech_timeout_s,
-        follow_up_window_s=config.follow_up_window_s,
-        max_utterance_s=config.max_utterance_s,
-        progress_update_after_s=config.progress_update_after_s,
-        stop_phrases=config.stop_phrases,
-        sleep_phrases=config.sleep_phrases,
-        # Spoken "go to sleep" and `hugo sleep`'s SIGTERM converge on the
-        # same graceful shutdown below (CONTEXT.md: Sleep).
-        on_sleep=stop_event.set,
-    )
-
-    running_loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        running_loop.add_signal_handler(sig, stop_event.set)
-
-    voice_task = asyncio.create_task(voice_loop.run())
-    logger.info("hugo is running — say '%s' to start a conversation", config.wake_word)
-    await stop_event.wait()
-
-    logger.info("shutting down...")
-    voice_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await voice_task
-    await stt.close()
-    await tts.close()
-    # Rest posture before releasing the robot: the physical cue that HUGO
-    # is off (VEN-56). Best-effort — a motor fault must not block the
-    # memory-release guarantee (ADR 0002).
+    # Everything past start_all runs under this try/finally: a failure
+    # anywhere here (found live 2026-07-23 — ReachyMiniClient raising
+    # FileNotFoundError for the daemon binary) must still tear the model
+    # servers down, or ~90GB of a teammate's memory leaks until someone
+    # notices (ADR 0002's guarantee, and exactly what happened: an
+    # orphaned EngineCore held 80GB+ after the crash).
     try:
-        await robot.goto_sleep()
-    except Exception:
-        logger.exception("failed to move robot to rest posture")
-    robot.close()
-    await process_manager.stop_all()
-    logger.info("hugo stopped, all model memory released")
+        memory_store = MemoryStore(config.memory_db_path)
+        await memory_store.initialize()
+
+        robot = ReachyMiniClient(playback_gain=config.playback_gain)
+        stt = SttClient(config.stt_ws_url)
+        await stt.connect()
+        tts = TtsClient(config.tts_ws_url)
+        await tts.connect()
+        llm = LlmClient(base_url=config.llm_base_url, model=config.llm_model)
+        web_search = WebSearchTool(config.tavily_api_key)
+
+        stop_event = asyncio.Event()
+
+        voice_loop = VoiceLoop(
+            robot=robot,
+            wake_word=WakeWordDetector(model_name=config.wake_word),
+            vad=SpeechActivityDetector(),
+            stt=stt,
+            tts=tts,
+            thinker=ToolLoop(llm, web_search=web_search),
+            tts_sample_rate_hz=config.tts_sample_rate_hz,
+            no_speech_timeout_s=config.no_speech_timeout_s,
+            follow_up_window_s=config.follow_up_window_s,
+            max_utterance_s=config.max_utterance_s,
+            progress_update_after_s=config.progress_update_after_s,
+            stop_phrases=config.stop_phrases,
+            sleep_phrases=config.sleep_phrases,
+            # Spoken "go to sleep" and `hugo sleep`'s SIGTERM converge on
+            # the same graceful shutdown below (CONTEXT.md: Sleep).
+            on_sleep=stop_event.set,
+        )
+
+        running_loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            running_loop.add_signal_handler(sig, stop_event.set)
+
+        voice_task = asyncio.create_task(voice_loop.run())
+        logger.info("hugo is running — say '%s' to start a conversation", config.wake_word)
+        await stop_event.wait()
+
+        logger.info("shutting down...")
+        voice_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await voice_task
+        await stt.close()
+        await tts.close()
+        # Rest posture before releasing the robot: the physical cue that
+        # HUGO is off (VEN-56). Best-effort — a motor fault must not block
+        # the memory-release guarantee (ADR 0002).
+        try:
+            await robot.goto_sleep()
+        except Exception:
+            logger.exception("failed to move robot to rest posture")
+        robot.close()
+    finally:
+        await process_manager.stop_all()
+        logger.info("hugo stopped, all model memory released")

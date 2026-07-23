@@ -4,7 +4,9 @@
 import asyncio
 import os
 import signal
+import sys
 import time
+from pathlib import Path
 
 import typer
 
@@ -52,6 +54,15 @@ def status() -> None:
 def start() -> None:
     """Load all models and start the voice loop (foreground)."""
     from hugo import orchestrator  # deferred: heavy import chain, only needed here
+
+    # reachy_mini spawns `reachy-mini-daemon` by PATH lookup, and that
+    # binary lives in this venv's own bin directory — which is only on
+    # PATH when the venv is activated. Running via the absolute
+    # .venv/bin/hugo from a non-activated shell (tmux, ssh, systemd)
+    # crashed with a real FileNotFoundError on dgx1 (2026-07-23). hugo
+    # knows where its own bin dir is; put it on PATH unconditionally.
+    venv_bin = str(Path(sys.executable).parent)
+    os.environ["PATH"] = venv_bin + os.pathsep + os.environ.get("PATH", "")
 
     config = load_config()
     configure_logging(config.log_level)
