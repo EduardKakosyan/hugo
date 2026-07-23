@@ -72,21 +72,42 @@ def _websocket_health_check(url: str) -> HealthCheck:
     return check
 
 
-def _build_specs(config: Config) -> list[ManagedProcessSpec]:
+def _build_specs(config: Config) -> list[list[ManagedProcessSpec]]:
+    """Startup stages (VEN-56 load-time work): STT and TTS first,
+    concurrently — they're a few GB each and their CUDA loads must happen
+    BEFORE vLLM's 74.8GB checkpoint read can fill the page cache (the
+    reproduced STT-OOM ordering) — then vLLM alone."""
     llm_port = urlsplit(config.llm_base_url).port
 
     async def evict_llm_checkpoint_from_page_cache() -> None:
         # Unified memory: vLLM's 74.8GB checkpoint read fills the page
-        # cache, and the next spec's CUDA model load OOMs rather than
-        # forcing reclaim — STT failed with a real CUDA OOM against 25GB
-        # of buff/cache, reproduced 2026-07-22 and 2026-07-23. Evict the
-        # checkpoint the moment vLLM is healthy (the weights are on the
-        # GPU now; the cached file pages are dead weight).
+        # cache and CUDA allocation doesn't force reclaim — a real CUDA
+        # OOM, reproduced 2026-07-22 and 2026-07-23. Staging STT/TTS
+        # before vLLM removes the original victim, but runtime allocations
+        # (TTS synthesis buffers, vLLM's own warmup) still benefit from
+        # the headroom: the weights are on the GPU once vLLM is healthy,
+        # so the cached file pages are pure dead weight.
         checkpoint_dir = hf_model_cache_dir(config.llm_model)
         evicted = await asyncio.to_thread(evict_directory_from_page_cache, checkpoint_dir)
         logger.info("evicted %.1f GiB of %s from the page cache", evicted / 2**30, checkpoint_dir)
 
-    return [
+    stt_and_tts = [
+        ManagedProcessSpec(
+            name="stt",
+            command=[str(config.stt_server_python), "-m", "hugo.servers.stt_server"],
+            health_check=_websocket_health_check(config.stt_ws_url),
+            health_check_timeout=120.0,
+        ),
+        ManagedProcessSpec(
+            name="tts",
+            command=[str(config.tts_server_python), "-m", "hugo.servers.tts_server"],
+            health_check=_websocket_health_check(config.tts_ws_url),
+            # Covers model load AND the pre-bind warmup synthesis the
+            # server runs (see tts_server._warmup_then_serve).
+            health_check_timeout=240.0,
+        ),
+    ]
+    vllm = [
         ManagedProcessSpec(
             name="vllm",
             # --port is explicit, not left to vLLM's own default — that
@@ -163,6 +184,14 @@ def _build_specs(config: Config) -> list[ManagedProcessSpec]:
                 # vllm#35615) — 0.25.0 satisfies it.
                 "--speculative-config",
                 '{"method": "mtp", "num_speculative_tokens": 3, "moe_backend": "triton"}',
+                # Parallel weight streaming (VEN-56 load-time work): the
+                # default safetensors loader read the checkpoint at
+                # ~120MB/s while the NVMe delivers 4.6GB/s single-stream
+                # (both measured on dgx1, 2026-07-23) — ~10 of the ~11
+                # startup minutes were this one bottleneck. Requires the
+                # vllm[runai] extra (see deploy/vllm/requirements.txt).
+                "--load-format",
+                "runai_streamer",
             ],
             health_check=_http_health_check(config.llm_base_url),
             # A ~80GB MoE model load is realistically minutes, not seconds —
@@ -183,21 +212,8 @@ def _build_specs(config: Config) -> list[ManagedProcessSpec]:
             extra_env={"MAX_JOBS": "4", "VLLM_NVFP4_GEMM_BACKEND": "marlin"},
             after_healthy=evict_llm_checkpoint_from_page_cache,
         ),
-        ManagedProcessSpec(
-            name="stt",
-            command=[str(config.stt_server_python), "-m", "hugo.servers.stt_server"],
-            health_check=_websocket_health_check(config.stt_ws_url),
-            health_check_timeout=120.0,
-        ),
-        ManagedProcessSpec(
-            name="tts",
-            command=[str(config.tts_server_python), "-m", "hugo.servers.tts_server"],
-            health_check=_websocket_health_check(config.tts_ws_url),
-            # Covers model load AND the pre-bind warmup synthesis the
-            # server now runs (see tts_server._warmup_then_serve).
-            health_check_timeout=240.0,
-        ),
     ]
+    return [stt_and_tts, vllm]
 
 
 async def run(config: Config) -> None:
@@ -208,21 +224,37 @@ async def run(config: Config) -> None:
         )
 
     process_manager = ProcessManager(pidfile=Pidfile(config.pidfile_path))
-    logger.info("starting model servers (vllm, stt, tts)...")
-    await process_manager.start_all(_build_specs(config))
+    logger.info("starting model servers (stt+tts, then vllm) and connecting robot...")
+    # Robot connect overlaps the server startup (VEN-56 load-time work):
+    # a cold reachy-mini daemon takes ~40s of spawn+retry that used to run
+    # serially after the models. ReachyMiniClient's constructor is
+    # blocking, hence to_thread.
+    robot_task = asyncio.create_task(
+        asyncio.to_thread(ReachyMiniClient, playback_gain=config.playback_gain)
+    )
+    try:
+        await process_manager.start_stages(_build_specs(config))
+    except BaseException:
+        # to_thread can't interrupt a mid-flight connect; wait it out and
+        # release the media pipeline if it succeeded, then let the startup
+        # failure propagate.
+        robot_task.cancel()
+        with contextlib.suppress(BaseException):
+            (await robot_task).close()
+        raise
     logger.info("model servers healthy")
 
-    # Everything past start_all runs under this try/finally: a failure
-    # anywhere here (found live 2026-07-23 — ReachyMiniClient raising
-    # FileNotFoundError for the daemon binary) must still tear the model
-    # servers down, or ~90GB of a teammate's memory leaks until someone
-    # notices (ADR 0002's guarantee, and exactly what happened: an
+    # Everything past server startup runs under this try/finally: a
+    # failure anywhere here (found live 2026-07-23 — ReachyMiniClient
+    # raising FileNotFoundError for the daemon binary) must still tear the
+    # model servers down, or ~90GB of a teammate's memory leaks until
+    # someone notices (ADR 0002's guarantee, and exactly what happened: an
     # orphaned EngineCore held 80GB+ after the crash).
     try:
         memory_store = MemoryStore(config.memory_db_path)
         await memory_store.initialize()
 
-        robot = ReachyMiniClient(playback_gain=config.playback_gain)
+        robot = await robot_task
         stt = SttClient(config.stt_ws_url)
         await stt.connect()
         tts = TtsClient(config.tts_ws_url)

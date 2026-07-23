@@ -60,25 +60,46 @@ class ProcessManager:
     _pgid: int | None = None
 
     async def start_all(self, specs: list[ManagedProcessSpec]) -> None:
-        """Become our own process group leader, then spawn and health-check
-        each spec in order. Tears down everything already started if any
-        spec fails, so a partial start never leaks subprocesses."""
+        """Spawn and health-check each spec strictly in order — a sequence
+        of single-spec stages."""
+        await self.start_stages([[spec] for spec in specs])
+
+    async def start_stages(self, stages: list[list[ManagedProcessSpec]]) -> None:
+        """Become our own process group leader, then bring up each stage:
+        every spec within a stage spawns and health-checks concurrently
+        (VEN-56 startup overlap — STT and TTS load together instead of
+        back to back), and the next stage starts only once the whole stage
+        is healthy. Tears down everything already started if anything
+        fails, so a partial start never leaks subprocesses (ADR 0002)."""
         os.setpgid(0, 0)
         self._pgid = os.getpgrp()
         self.pidfile.write(self._pgid)
 
         try:
-            for spec in specs:
-                env = {**os.environ, **spec.extra_env} if spec.extra_env else None
-                proc = await asyncio.create_subprocess_exec(*spec.command, env=env)
-                self._processes.append((spec.name, proc))
-                if spec.health_check is not None and not await self._wait_healthy(spec, proc):
-                    raise HealthCheckFailed(spec.name)
-                if spec.after_healthy is not None:
-                    await spec.after_healthy()
+            for stage in stages:
+                started: list[tuple[ManagedProcessSpec, asyncio.subprocess.Process]] = []
+                for spec in stage:
+                    env = {**os.environ, **spec.extra_env} if spec.extra_env else None
+                    proc = await asyncio.create_subprocess_exec(*spec.command, env=env)
+                    self._processes.append((spec.name, proc))
+                    started.append((spec, proc))
+                try:
+                    async with asyncio.TaskGroup() as group:
+                        for spec, proc in started:
+                            group.create_task(self._bring_up(spec, proc))
+                except BaseExceptionGroup as eg:
+                    # Callers (and the existing tests) expect the plain
+                    # HealthCheckFailed/ProcessDied, not an ExceptionGroup.
+                    raise eg.exceptions[0] from eg
         except Exception:
             await self.stop_all()
             raise
+
+    async def _bring_up(self, spec: ManagedProcessSpec, proc: asyncio.subprocess.Process) -> None:
+        if spec.health_check is not None and not await self._wait_healthy(spec, proc):
+            raise HealthCheckFailed(spec.name)
+        if spec.after_healthy is not None:
+            await spec.after_healthy()
 
     async def stop_all(self, grace_period: float = 10.0) -> None:
         """Graceful shutdown: SIGTERM everything in reverse start order,

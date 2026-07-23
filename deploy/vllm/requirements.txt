@@ -11,4 +11,9 @@
 # ninja-build: flashinfer (vLLM's sampling kernel backend) JIT-compiles a
 #   CUDA kernel via ninja on first use; without it, engine startup fails
 #   during warmup with FileNotFoundError: 'ninja'.
-vllm>=0.25
+# [runai] adds the Run:ai Model Streamer for --load-format runai_streamer
+# (VEN-56): the default safetensors loader read the 74.8GB checkpoint at
+# ~120MB/s against an NVMe measured at 4.6GB/s — ~10 minutes of the ~11
+# minute startup. Wheels confirmed resolving on dgx1's aarch64
+# (runai-model-streamer 0.16.1, 2026-07-23).
+vllm[runai]>=0.25

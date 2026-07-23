@@ -80,15 +80,18 @@ async def test_websocket_health_check_false_for_an_unreachable_server() -> None:
     assert await check() is False
 
 
-def test_build_specs_names_and_commands(tmp_path: Path) -> None:
+def test_build_specs_stages_stt_and_tts_before_vllm(tmp_path: Path) -> None:
     config = Config(repo_dir=tmp_path, state_dir=tmp_path / "state")
 
-    specs = _build_specs(config)
+    stages = _build_specs(config)
 
-    names = [s.name for s in specs]
-    assert names == ["vllm", "stt", "tts"]
+    # STT/TTS load first (concurrently), vLLM second: their CUDA loads
+    # must happen before vLLM's checkpoint read fills the page cache —
+    # the reproduced STT-OOM ordering (VEN-56).
+    names = [[spec.name for spec in stage] for stage in stages]
+    assert names == [["stt", "tts"], ["vllm"]]
 
-    vllm_spec = specs[0]
+    vllm_spec = stages[1][0]
     # Explicit --port matters: relying on vLLM's own default (also 8000)
     # caused a real "Address already in use" collision with the Reachy
     # Mini daemon's own default port on dgx1. --gpu-memory-utilization
@@ -115,18 +118,20 @@ def test_build_specs_names_and_commands(tmp_path: Path) -> None:
         '{"enable_thinking": false}',
         "--speculative-config",
         '{"method": "mtp", "num_speculative_tokens": 3, "moe_backend": "triton"}',
+        "--load-format",
+        "runai_streamer",
     ]
     assert vllm_spec.extra_env is not None
     assert vllm_spec.extra_env["VLLM_NVFP4_GEMM_BACKEND"] == "marlin"
 
-    stt_spec = specs[1]
+    stt_spec = stages[0][0]
     assert stt_spec.command == [
         str(tmp_path / ".venv-stt" / "bin" / "python"),
         "-m",
         "hugo.servers.stt_server",
     ]
 
-    tts_spec = specs[2]
+    tts_spec = stages[0][1]
     assert tts_spec.command == [
         str(tmp_path / ".venv-tts" / "bin" / "python"),
         "-m",
@@ -137,6 +142,6 @@ def test_build_specs_names_and_commands(tmp_path: Path) -> None:
 def test_build_specs_all_have_health_checks(tmp_path: Path) -> None:
     config = Config(repo_dir=tmp_path, state_dir=tmp_path / "state")
 
-    specs = _build_specs(config)
+    stages = _build_specs(config)
 
-    assert all(spec.health_check is not None for spec in specs)
+    assert all(spec.health_check is not None for stage in stages for spec in stage)

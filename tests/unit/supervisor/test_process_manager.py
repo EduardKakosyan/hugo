@@ -116,6 +116,48 @@ async def test_start_all_waits_for_health_check_to_pass(
     assert attempts == 3
 
 
+async def test_specs_within_a_stage_health_check_concurrently(
+    tmp_path: Path, fake_processes: list[FakeProcess]
+) -> None:
+    # Each spec's health check only passes once the OTHER has been polled —
+    # sequential bring-up would poll spec a to its timeout without ever
+    # touching spec b. Completing at all proves the stage runs concurrently.
+    a_polled = asyncio.Event()
+    b_polled = asyncio.Event()
+
+    async def health_a() -> bool:
+        a_polled.set()
+        return b_polled.is_set()
+
+    async def health_b() -> bool:
+        b_polled.set()
+        return a_polled.is_set()
+
+    manager = ProcessManager(pidfile=Pidfile(tmp_path / "hugo.pid"))
+    await manager.start_stages(
+        [
+            [
+                ManagedProcessSpec(
+                    name="a",
+                    command=["true"],
+                    health_check=health_a,
+                    health_check_interval=0.001,
+                    health_check_timeout=1.0,
+                ),
+                ManagedProcessSpec(
+                    name="b",
+                    command=["true"],
+                    health_check=health_b,
+                    health_check_interval=0.001,
+                    health_check_timeout=1.0,
+                ),
+            ]
+        ]
+    )
+
+    assert a_polled.is_set() and b_polled.is_set()
+
+
 async def test_after_healthy_runs_between_this_spec_and_the_next(
     tmp_path: Path, fake_processes: list[FakeProcess]
 ) -> None:
