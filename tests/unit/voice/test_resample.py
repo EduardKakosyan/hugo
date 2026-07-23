@@ -35,9 +35,7 @@ def test_chunked_processing_matches_one_shot_exactly() -> None:
 
 
 def test_waveform_is_preserved() -> None:
-    resampled = LinearPcm16Resampler(24_000, 16_000).process(
-        _sine_pcm16(200, 24_000, 0.25)
-    )
+    resampled = LinearPcm16Resampler(24_000, 16_000).process(_sine_pcm16(200, 24_000, 0.25))
     got = np.frombuffer(resampled, dtype=np.int16).astype(np.float64) / 32767
     t = np.arange(len(got)) / 16_000
     expected = 0.5 * np.sin(2 * np.pi * 200 * t)

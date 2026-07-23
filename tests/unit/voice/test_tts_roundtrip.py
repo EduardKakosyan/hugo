@@ -181,9 +181,7 @@ def test_split_sentences_splits_on_terminal_punctuation() -> None:
 def test_split_sentences_passes_unpunctuated_text_through_whole() -> None:
     from hugo.servers.tts_server import split_sentences
 
-    assert split_sentences("no punctuation at all here") == [
-        "no punctuation at all here"
-    ]
+    assert split_sentences("no punctuation at all here") == ["no punctuation at all here"]
 
 
 def test_split_sentences_drops_empty_segments() -> None:
