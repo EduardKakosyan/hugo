@@ -11,6 +11,14 @@ from silero_vad import VADIterator, load_silero_vad
 SAMPLE_RATE_HZ = 16_000
 DEFAULT_THRESHOLD = 0.5
 
+# How long the user must stay silent before their utterance is considered
+# finished. Silero's default is 100ms, which ends the turn at any natural
+# mid-sentence pause — live 2026-07-23, HUGO answered a thinking-pause
+# "uh" as if it were the whole question and talked over the rest of the
+# sentence ("keeps cutting me off"). The cost of patience is added
+# response latency (exactly this much), so it's a balance, not a maximum.
+DEFAULT_MIN_SILENCE_MS = 800
+
 # Silero's ONNX model hard-requires exactly this many samples per call at
 # 16kHz (confirmed by reading OnnxWrapper.__call__ on dgx1: it raises
 # ValueError on any other size) — but mic frames from ReachyMiniClient
@@ -25,9 +33,18 @@ SpeechEvent = Literal["speech_start", "speech_end"]
 
 
 class SpeechActivityDetector:
-    def __init__(self, threshold: float = DEFAULT_THRESHOLD) -> None:
+    def __init__(
+        self,
+        threshold: float = DEFAULT_THRESHOLD,
+        min_silence_duration_ms: int = DEFAULT_MIN_SILENCE_MS,
+    ) -> None:
         model = load_silero_vad(onnx=True)
-        self._iterator = VADIterator(model, sampling_rate=SAMPLE_RATE_HZ, threshold=threshold)
+        self._iterator = VADIterator(
+            model,
+            sampling_rate=SAMPLE_RATE_HZ,
+            threshold=threshold,
+            min_silence_duration_ms=min_silence_duration_ms,
+        )
         self._buffer = bytearray()
 
     def feed(self, pcm16_chunk: bytes) -> SpeechEvent | None:
