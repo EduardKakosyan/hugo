@@ -56,6 +56,7 @@ backend, rather than assuming 1.
 import asyncio
 import logging
 import math
+import subprocess
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -70,6 +71,37 @@ POLL_INTERVAL_S = 0.01
 DAEMON_CONNECT_RETRIES = 3
 DAEMON_CONNECT_RETRY_DELAY_S = 20.0
 
+# ALSA card name of the robot's "Reachy Mini Audio" USB device on dgx1.
+SPEAKER_ALSA_CARD = "Audio"
+
+
+def _set_speaker_hardware_volume_to_max() -> None:
+    """Pins the robot DAC's ALSA playback mixer to 0dB at every startup.
+
+    Found live 2026-07-23 while chasing "I can't understand what it's
+    saying": the device enumerates with 'PCM,0' at 62% = -23dB, so the
+    speaker was attenuated in hardware while HUGO_PLAYBACK_GAIN=1.4
+    simultaneously pushed loud syllables into the soft-clipper — quiet
+    AND distorted. The SDK's MediaManager exposes no volume control (the
+    earlier finding below stands), but the hardware mixer does; 0dB here
+    with software gain ~1.0 is both louder and cleaner. ALSA state does
+    not survive reboot/replug for this device, hence set on every
+    connect. Best-effort: a missing amixer or renamed card must not
+    block the voice stack — software gain still works without it.
+    """
+    for control in ("PCM,0", "PCM,1"):
+        result = subprocess.run(
+            ["amixer", "-D", f"hw:{SPEAKER_ALSA_CARD}", "sset", control, "100%"],
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "could not set robot speaker hardware volume (%s): %s",
+                control,
+                result.stderr.decode(errors="replace").strip(),
+            )
+
 
 class ReachyMiniClient:
     def __init__(self, use_sim: bool = False, playback_gain: float = 1.0) -> None:
@@ -77,9 +109,13 @@ class ReachyMiniClient:
 
         self._robot = self._connect_with_retries(ReachyMini, use_sim)
         self._media = self._robot.media
+        _set_speaker_hardware_volume_to_max()
         # Software gain on all speaker output: the media backend exposes no
         # volume control at all (confirmed by inspecting MediaManager on
-        # dgx1, 2026-07-23), and the robot is audibly too quiet at unity.
+        # dgx1, 2026-07-23) — but the DAC's ALSA hardware mixer does, see
+        # _set_speaker_hardware_volume_to_max above. With hardware at 0dB
+        # this gain is a trim around 1.0, not a loudness crutch: values
+        # much above 1.0 saturate the soft-clipper into mush.
         # Applied in float space with clipping (_float32_to_pcm16 clips).
         self._playback_gain = playback_gain
         self.input_sample_rate_hz: int = self._media.get_input_audio_samplerate()
