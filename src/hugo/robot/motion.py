@@ -2,11 +2,18 @@
 
 Maps conversation state (cues from the voice loop) to expressive motion:
 
-    idle              calm breathing — z sine + counter-phase antenna sway
+    idle              STILL at neutral — motion is communication, not
+                      ambient decoration (live user feedback 2026-07-23:
+                      idle breathing read as senseless movement; HUGO
+                      only moves when listening/thinking/speaking)
     attentive         perk (goto) then hold still; face tracking active
     user_speech_hold  frozen: pose held, tracking paused at weight 0
     thinking          subtle one-antenna sway filling STT+LLM latency
     speaking          antenna wag; head = held anchor + the SDK's wobbler
+
+Amplitudes are deliberately small: the ecosystem-canonical values were
+tried live and read as far too much motion on a desk at arm's length —
+current values are roughly half or less (same feedback session).
 
 Hard rules encoded here — every one is a documented Reachy Mini hardware
 failure mode (VEN-57 research, 2026-07-23), not taste:
@@ -29,8 +36,9 @@ What is deliberately NOT here: speech-synced head bobbing (the SDK's
 wobbler, enabled once at start(), analyses the TTS audio we push and
 composes offsets daemon-side on top of whatever this manager commands)
 and face detection (daemon-side head tracking; this manager only toggles
-its blend weight). Randomized idle "presence" emotes from the recorded
-moves library are a VEN-57 follow-up, not in this increment.
+its blend weight). Idle breathing and randomized "presence" emotes were
+in the original VEN-57 design and are intentionally absent — see the
+idle-means-still feedback above before reintroducing anything ambient.
 """
 
 import asyncio
@@ -47,32 +55,25 @@ MotionState = Literal["idle", "attentive", "user_speech_hold", "thinking", "spea
 
 TICK_S = 0.04  # 25Hz
 
-# Idle breathing — the ecosystem-canonical values (official conversation
-# app): slow vertical sine plus counter-phase antenna sway around neutral.
-BREATH_Z_AMPLITUDE_M = 0.005
-BREATH_Z_FREQ_HZ = 0.1
-BREATH_ANTENNA_AMPLITUDE_RAD = math.radians(15)
-BREATH_ANTENNA_FREQ_HZ = 0.5
-
 # (right, left) — the SDK's neutral, ~10° off-vertical (vertical resonates).
 NEUTRAL_ANTENNAS = (-0.1745, 0.1745)
 NEUTRAL_HEAD = HeadOffsets()
 
 # Attentive perk: slight rise and nose-up, antennas nearly vertical.
-ATTENTIVE_HEAD = HeadOffsets(z_m=0.008, pitch_rad=math.radians(-8))
+ATTENTIVE_HEAD = HeadOffsets(z_m=0.004, pitch_rad=math.radians(-4))
 ATTENTIVE_ANTENNAS = (-0.06, 0.06)
 PERK_DURATION_S = 0.4
 # Follow-up listening reuses the antenna pose without the head perk.
 REJOIN_DURATION_S = 0.3
 NEUTRAL_RETURN_S = 1.0
 
-# Thinking: the right antenna droops and sways slowly — "hmm".
-THINKING_ANTENNA_CENTER_RAD = -0.35
-THINKING_ANTENNA_AMPLITUDE_RAD = math.radians(7)
+# Thinking: the right antenna droops a little and sways slowly — "hmm".
+THINKING_ANTENNA_CENTER_RAD = -0.2
+THINKING_ANTENNA_AMPLITUDE_RAD = math.radians(3)
 THINKING_ANTENNA_FREQ_HZ = 0.4
 
-# Speaking wag: brisk, modest amplitude, on top of the attentive pose.
-WAG_AMPLITUDE_RAD = math.radians(12)
+# Speaking wag: brisk but small, on top of the attentive pose.
+WAG_AMPLITUDE_RAD = math.radians(5)
 WAG_FREQ_HZ = 1.2
 
 # Send-deadband and slew limits (community-measured values).
@@ -248,17 +249,7 @@ class MotionManager:
 
     async def _tick(self) -> None:
         t = asyncio.get_running_loop().time() - self._phase_started_at
-        if self.state == "idle":
-            breath = math.sin(2 * math.pi * BREATH_Z_FREQ_HZ * t)
-            sway = math.sin(2 * math.pi * BREATH_ANTENNA_FREQ_HZ * t)
-            await self._send(
-                HeadOffsets(z_m=BREATH_Z_AMPLITUDE_M * breath),
-                (
-                    NEUTRAL_ANTENNAS[0] - BREATH_ANTENNA_AMPLITUDE_RAD * sway,
-                    NEUTRAL_ANTENNAS[1] + BREATH_ANTENNA_AMPLITUDE_RAD * sway,
-                ),
-            )
-        elif self.state == "thinking":
+        if self.state == "thinking":
             sway = math.sin(2 * math.pi * THINKING_ANTENNA_FREQ_HZ * t)
             await self._send(
                 None,
@@ -270,9 +261,9 @@ class MotionManager:
         elif self.state == "speaking":
             wag = WAG_AMPLITUDE_RAD * math.sin(2 * math.pi * WAG_FREQ_HZ * t)
             await self._send(None, (ATTENTIVE_ANTENNAS[0] + wag, ATTENTIVE_ANTENNAS[1] + wag))
-        # "attentive" and "user_speech_hold" deliberately send nothing:
-        # stillness is the behavior (and the head belongs to tracking or
-        # the held anchor).
+        # "idle", "attentive" and "user_speech_hold" deliberately send
+        # nothing: stillness is the behavior (and while attentive/held the
+        # head belongs to tracking or the held anchor).
 
     async def _send(self, head: HeadOffsets | None, antennas: tuple[float, float] | None) -> None:
         head_to_send: HeadOffsets | None = None

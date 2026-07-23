@@ -81,24 +81,14 @@ def _build() -> tuple[MotionManager, FakeRobotMotion]:
     return MotionManager(robot, tick_s=0.005), robot
 
 
-async def test_start_enables_wobbling_and_breathes() -> None:
+async def test_start_enables_wobbling_and_idles_perfectly_still() -> None:
     manager, robot = _build()
-
-    def distinct_z_values() -> set[float]:
-        return {head.z_m for _, head, _ in robot.targets() if isinstance(head, HeadOffsets)}
-
-    def distinct_antennas() -> set[object]:
-        return {antennas for _, _, antennas in robot.targets() if antennas is not None}
-
     await manager.start()
     try:
         assert robot.calls[0] == ("enable_wobbling",)
-        # Breathing is alive motion, not a repeated frozen target: the
-        # vertical offset and antenna sway both change over time. The slow
-        # z sine clears the send-deadband only every few hundred ms, so
-        # distinct values arrive at breathing pace, not tick pace.
-        await _wait_until(lambda: len(distinct_z_values()) >= 2, timeout_s=3.0)
-        await _wait_until(lambda: len(distinct_antennas()) >= 2)
+        # Idle means STILL (VEN-57 as revised): motion is communication,
+        # not ambient decoration — zero motor traffic until a conversation.
+        assert await _settled_call_count(robot) == 0
     finally:
         await manager.stop()
 
@@ -173,7 +163,7 @@ async def test_thinking_and_speaking_move_antennas_only() -> None:
         await manager.stop()
 
 
-async def test_conversation_end_stops_tracking_and_resumes_breathing() -> None:
+async def test_conversation_end_settles_to_neutral_then_stillness() -> None:
     manager, robot = _build()
     await manager.start()
     try:
@@ -188,8 +178,8 @@ async def test_conversation_end_stops_tracking_and_resumes_breathing() -> None:
         # Tracking off before the neutral goto, or the goto's head
         # component is fought by the tracker.
         assert robot.calls.index(("stop_tracking",)) < robot.calls.index(neutral_goto)
-        breathing_resumed = len(robot.targets())
-        await _wait_until(lambda: len(robot.targets()) > breathing_resumed)
+        # Settled means settled: no further motor traffic while idle.
+        assert await _settled_call_count(robot) == 0
     finally:
         await manager.stop()
 
@@ -204,6 +194,9 @@ async def test_robot_errors_do_not_kill_the_motion_task() -> None:
     robot.set_motion_target = explode  # type: ignore[method-assign]
     await manager.start()
     try:
+        manager.cue("wake")
+        await _wait_until(lambda: manager.state == "attentive")
+        manager.cue("speaking")
         # Ticks keep coming despite every send failing.
         await _wait_until(lambda: len(robot.targets()) >= 3)
     finally:

@@ -229,26 +229,6 @@ def _build_specs(config: Config) -> list[list[ManagedProcessSpec]]:
     return [stt_and_tts, vllm]
 
 
-async def _robot_online(config: Config) -> tuple[ReachyMiniClient, MotionManager]:
-    """Connects the robot, stands it up, and starts the idle motion layer
-    (breathing) — run concurrently with the model-server startup so the
-    robot is visibly alive during the minutes-long load (VEN-57). The
-    ReachyMiniClient constructor is blocking, hence to_thread."""
-    robot = await asyncio.to_thread(ReachyMiniClient, playback_gain=config.playback_gain)
-    # Physically stand up: the motors stay in rest posture from the last
-    # sleep otherwise, and a slumped robot reads as 'asleep' regardless of
-    # what the voice does. Usually redundant after the wake listener's
-    # stand-up, but not on a manual/CLI start. Best-effort — a motor fault
-    # must not block the voice stack.
-    try:
-        await robot.wake_up()
-    except Exception:
-        logger.exception("failed to stand the robot up; continuing")
-    motion = MotionManager(robot)
-    await motion.start()
-    return robot, motion
-
-
 async def run(config: Config) -> None:
     if not config.tavily_api_key:
         raise RuntimeError(
@@ -260,10 +240,14 @@ async def run(config: Config) -> None:
     logger.info("starting model servers (stt+tts, then vllm) and connecting robot...")
     # Robot connect overlaps the server startup (VEN-56 load-time work):
     # a cold reachy-mini daemon takes ~40s of spawn+retry that used to run
-    # serially after the models. Once connected, the robot stands up and
-    # breathes through the rest of the minutes-long load (VEN-57) — a
-    # motionless standing robot after the wake chime reads as hung.
-    robot_online_task = asyncio.create_task(_robot_online(config))
+    # serially after the models. Connect only — the body deliberately
+    # stays in rest posture until the voice loop is about to go live
+    # (VEN-57 as revised): standing through the minutes-long load was
+    # tried and read as senseless motion (live feedback, 2026-07-23).
+    # ReachyMiniClient's constructor is blocking, hence to_thread.
+    robot_task = asyncio.create_task(
+        asyncio.to_thread(ReachyMiniClient, playback_gain=config.playback_gain)
+    )
 
     async def keep_checkpoint_out_of_page_cache() -> None:
         # vLLM sizes its KV cache from *free* memory at profile time, and
@@ -290,11 +274,9 @@ async def run(config: Config) -> None:
         # to_thread can't interrupt a mid-flight connect; wait it out and
         # release the media pipeline if it succeeded, then let the startup
         # failure propagate.
-        robot_online_task.cancel()
+        robot_task.cancel()
         with contextlib.suppress(BaseException):
-            robot, motion = await robot_online_task
-            await motion.stop()
-            robot.close()
+            (await robot_task).close()
         raise
     finally:
         eviction_task.cancel()
@@ -312,7 +294,7 @@ async def run(config: Config) -> None:
         memory_store = MemoryStore(config.memory_db_path)
         await memory_store.initialize()
 
-        robot, motion = await robot_online_task
+        robot = await robot_task
         stt = SttClient(config.stt_ws_url)
         await stt.connect()
         tts = TtsClient(config.tts_ws_url)
@@ -331,6 +313,18 @@ async def run(config: Config) -> None:
             logger.info("llm warmup complete")
         except Exception:
             logger.warning("llm warmup failed; first turn will be slow", exc_info=True)
+
+        # Wake the body only now that everything is loaded: this stand-up,
+        # right before the spoken "I'm awake.", IS the physical "load is
+        # done" cue (VEN-57 as revised — the robot stays in rest posture
+        # through the whole load). Best-effort — a motor fault must not
+        # block the voice stack.
+        try:
+            await robot.wake_up()
+        except Exception:
+            logger.exception("failed to stand the robot up; continuing")
+        motion = MotionManager(robot)
+        await motion.start()
 
         stop_event = asyncio.Event()
 
