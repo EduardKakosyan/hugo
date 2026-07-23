@@ -24,6 +24,10 @@ ExecStart=%h/hugo/.venv/bin/hugo start
 KillSignal=SIGTERM
 TimeoutStopSec=180
 Restart=no
+# Shutdown ends with hugo's own group-wide SIGKILL sweep (the orphaned-
+# EngineCore safety net), which takes hugo itself with it by design —
+# that's a successful stop, not a crash.
+SuccessExitStatus=SIGKILL
 
 [Install]
 WantedBy=default.target

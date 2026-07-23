@@ -101,7 +101,21 @@ def main(make_transcriber: Callable[[], Transcriber] = _create_default_transcrib
 
     logging.basicConfig(level=logging.INFO)
     transcriber = make_transcriber()
-    asyncio.run(serve(transcriber, args.host, args.port))
+    asyncio.run(_warmup_then_serve(transcriber, args.host, args.port))
+
+
+async def _warmup_then_serve(transcriber: Transcriber, host: str, port: int) -> None:
+    # One throwaway transcription before binding the socket, mirroring the
+    # TTS server: the first real inference pays cold CUDA costs that landed
+    # on the first live turn (2.59s to transcribe vs 0.09s warm — measured
+    # on dgx1, 2026-07-23). The orchestrator's health check only passes
+    # once bound, so warmup time is covered by the stt health_check_timeout.
+    logger.info("stt_server: warming up transcriber...")
+    await transcriber.feed(b"\x00" * 32_000)  # 1s of silence at 16kHz
+    await transcriber.finalize()
+    transcriber.reset()
+    logger.info("stt_server: warmup complete")
+    await serve(transcriber, host, port)
 
 
 if __name__ == "__main__":

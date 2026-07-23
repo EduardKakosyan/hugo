@@ -136,3 +136,20 @@ def test_downmix_then_upmix_round_trips_when_channels_were_identical() -> None:
     round_tripped = _upmix_mono(mono, channels=2)
 
     assert np.allclose(round_tripped, stereo_in)
+
+
+def test_soft_clip_passes_quiet_audio_untouched() -> None:
+    from hugo.robot.reachy_client import soft_clip
+
+    quiet = np.array([0.0, 0.3, -0.5, 0.84], dtype=np.float64)
+    assert np.array_equal(soft_clip(quiet), quiet)
+
+
+def test_soft_clip_saturates_loud_audio_inside_unit_range() -> None:
+    from hugo.robot.reachy_client import soft_clip
+
+    loud = np.array([0.9, 1.5, 2.0, -2.0, -4.0], dtype=np.float64)
+    clipped = soft_clip(loud)
+    assert np.all(np.abs(clipped) <= 1.0)  # bounded (asymptote hits 1.0 in float)
+    assert np.all(np.diff(clipped[:3]) > 0)  # still monotonic — no flat-top
+    assert clipped[3] == -clipped[2]  # symmetric

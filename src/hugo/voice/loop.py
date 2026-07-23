@@ -66,7 +66,7 @@ from typing import Literal, Protocol
 from hugo.robot.audio_io import RobotAudioIO
 from hugo.voice.broadcaster import FrameBroadcaster
 from hugo.voice.chime import conversation_end_chime_pcm16, wake_chime_pcm16
-from hugo.voice.resample import LinearPcm16Resampler
+from hugo.voice.resample import StreamingPcm16Resampler
 from hugo.voice.stt import Transcript
 from hugo.voice.turn import Turn
 from hugo.voice.vad import SpeechEvent
@@ -416,7 +416,7 @@ class VoiceLoop:
         return interrupted
 
     async def _speak(self, text: str) -> None:
-        resampler = LinearPcm16Resampler(
+        resampler = StreamingPcm16Resampler(
             self._tts_sample_rate_hz, self._robot.output_sample_rate_hz
         )
         async for chunk in self._tts.speak(text):

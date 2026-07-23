@@ -298,6 +298,18 @@ async def run(config: Config) -> None:
         llm = LlmClient(base_url=config.llm_base_url, model=config.llm_model)
         web_search = WebSearchTool(config.tavily_api_key)
 
+        # First-inference warmup: the first live turn paid 12.77s to first
+        # audio vs ~3.5s warm (dgx1, 2026-07-23) — cold CUDA paths and an
+        # empty prefix cache. One throwaway request eats that cost before
+        # the wake word can. Best-effort: a failure here is a warning, not
+        # a startup failure.
+        try:
+            async with asyncio.timeout(60.0):
+                await llm.complete([{"role": "user", "content": "Say the word ready."}])
+            logger.info("llm warmup complete")
+        except Exception:
+            logger.warning("llm warmup failed; first turn will be slow", exc_info=True)
+
         stop_event = asyncio.Event()
 
         voice_loop = VoiceLoop(

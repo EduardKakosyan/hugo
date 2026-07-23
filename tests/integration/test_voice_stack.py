@@ -192,7 +192,7 @@ async def test_full_cascade_round_trip_no_human_required(config: Config) -> None
     await _require_ws(config.stt_ws_url)
     from hugo.agent.tool_loop import ToolLoop
     from hugo.voice.loop import normalize_command
-    from hugo.voice.resample import LinearPcm16Resampler
+    from hugo.voice.resample import StreamingPcm16Resampler
     from hugo.voice.stt import SttClient
     from hugo.voice.tts import TtsClient
 
@@ -204,7 +204,7 @@ async def test_full_cascade_round_trip_no_human_required(config: Config) -> None
     assert len(spoken_pcm) > 0, "TTS produced no audio"
 
     # 2. The robot's mic runs at 16kHz — resample exactly as the loop does.
-    resampler = LinearPcm16Resampler(config.tts_sample_rate_hz, 16_000)
+    resampler = StreamingPcm16Resampler(config.tts_sample_rate_hz, 16_000)
     mic_pcm = resampler.process(spoken_pcm)
 
     # 3. STT hears it.

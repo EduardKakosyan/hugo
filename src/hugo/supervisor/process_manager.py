@@ -129,11 +129,16 @@ class ProcessManager:
                 proc.kill()
         await self._wait_all_exited(grace_period)
 
-        if self._pgid is not None:
-            _safe_killpg(self._pgid, signal.SIGKILL)
-
+        # Bookkeeping BEFORE the group sweep: when stop_all runs inside the
+        # orchestrator itself (voice sleep / SIGTERM path), the sweep kills
+        # our own group including us — nothing after it executes. Running
+        # it last used to leave a stale pidfile behind on every graceful
+        # shutdown (found on dgx1, 2026-07-23).
         self._processes.clear()
         self.pidfile.remove()
+
+        if self._pgid is not None:
+            _safe_killpg(self._pgid, signal.SIGKILL)
 
     async def _wait_healthy(
         self, spec: ManagedProcessSpec, proc: asyncio.subprocess.Process

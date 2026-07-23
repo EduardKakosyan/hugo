@@ -25,6 +25,7 @@ text length anyway.
 """
 
 import asyncio
+import os
 import threading
 from collections.abc import AsyncGenerator
 
@@ -33,14 +34,18 @@ import torch
 from faster_qwen3_tts import FasterQwen3TTS
 
 MODEL_NAME = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
-DEFAULT_SPEAKER = "ryan"
+# Overridable via env so voice A/B testing is a config flip + TTS-server
+# restart, not a code change (VEN-56 voice-quality feedback). Supported
+# speakers on the CustomVoice checkpoint (confirmed on dgx1): aiden,
+# dylan, eric, ono_anna, ryan, serena, sohee, uncle_fu, vivian.
+DEFAULT_SPEAKER = os.environ.get("HUGO_TTS_SPEAKER", "ryan")
 DEFAULT_LANGUAGE = "English"
 SAMPLE_RATE_HZ = 24_000
 # Decode steps per yielded chunk: 4 steps ≈ 333ms of audio at the model's
 # 12Hz frame rate — the author's chunk-size sweep shows smaller chunks cut
 # time-to-first-audio at a small throughput cost, the right trade for a
 # conversational assistant.
-CHUNK_DECODE_STEPS = 4
+CHUNK_DECODE_STEPS = int(os.environ.get("HUGO_TTS_CHUNK_STEPS", "4"))
 
 
 class QwenTtsSynthesizer:

@@ -145,7 +145,7 @@ class ReachyMiniClient:
         await asyncio.to_thread(self._media.audio.clear_player)
 
     async def play_audio(self, pcm16_chunk: bytes) -> None:
-        boosted = np.clip(_pcm16_to_float32(pcm16_chunk) * self._playback_gain, -1.0, 1.0)
+        boosted = soft_clip(_pcm16_to_float32(pcm16_chunk) * self._playback_gain)
         samples = _upmix_mono(boosted.astype(np.float32), self.output_channels)
         await asyncio.to_thread(self._media.push_audio_sample, samples)
 
@@ -156,6 +156,28 @@ class ReachyMiniClient:
 
     def close(self) -> None:
         self._robot.release_media()
+
+
+# Where the saturation curve starts. Below the knee the signal is
+# untouched; above it, a tanh blend approaches 1.0 asymptotically.
+_SOFT_CLIP_KNEE = 0.85
+
+
+def soft_clip(samples: np.ndarray) -> np.ndarray:
+    """Saturates gently instead of hard-clipping. The first live VEN-56
+    session ran gain 2.0 through np.clip and every loud syllable
+    distorted audibly ('annoying') — hard clipping squares off peaks into
+    harmonic hash. This keeps the waveform inside [-1, 1] with a smooth
+    knee instead."""
+    magnitude = np.abs(samples)
+    over = magnitude > _SOFT_CLIP_KNEE
+    if not np.any(over):
+        return samples
+    headroom = 1.0 - _SOFT_CLIP_KNEE
+    saturated = _SOFT_CLIP_KNEE + headroom * np.tanh((magnitude[over] - _SOFT_CLIP_KNEE) / headroom)
+    out = samples.copy()
+    out[over] = np.sign(samples[over]) * saturated
+    return out
 
 
 def _float32_to_pcm16(samples: np.ndarray) -> bytes:
