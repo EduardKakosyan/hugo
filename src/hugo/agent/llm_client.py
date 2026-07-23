@@ -2,21 +2,61 @@
 (ADR 0004: Nemotron-3-super-120b-a12b). vLLM's server doesn't check the API
 key, but the openai SDK requires some value — a placeholder is fine.
 
-NOT YET verified against a real served model: loading Nemotron-3 on vLLM
-is a heavy (~60-70GB), long-running operation on the *shared* dgx1 box
-(ADR 0002) — unlike the smaller checks elsewhere in this codebase, this
-needs explicit coordination before running for real, not just a quick
-spike. Built and tested here against the `openai` SDK's stable, documented
-client interface instead.
+stream_with_tools is the voice path (VEN-56): it yields content-text deltas
+the moment they arrive so the tool loop can start speaking sentences while
+the model is still generating, then yields exactly one AssistantTurn with
+the fully-assembled message (content + any tool calls). Tool-call fragments
+are accumulated by stream index per the OpenAI streaming contract; with
+vLLM's qwen3_coder parser the arguments arrive whole rather than
+token-by-token, but the accumulation handles either. Reasoning deltas are
+deliberately never yielded — the reasoning trace is separated server-side
+by vLLM's nemotron_v3 parser (see orchestrator._build_specs) and must
+never reach TTS (CONTEXT.md: Reasoning trace).
 """
 
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from typing import Any, cast
 
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageParam, ChatCompletionToolParam
-from openai.types.chat.chat_completion_message import ChatCompletionMessage
 
 DEFAULT_API_KEY = "not-needed"
+
+# Nemotron 3's model card recommends these "across all tasks and serving
+# backends" — left implicit before VEN-56, which meant vLLM's own defaults.
+TEMPERATURE = 1.0
+TOP_P = 0.95
+
+
+@dataclass(frozen=True)
+class ToolCallRequest:
+    id: str
+    name: str
+    arguments: str
+
+
+@dataclass(frozen=True)
+class AssistantTurn:
+    """One assistant response, reassembled from its stream."""
+
+    content: str
+    tool_calls: tuple[ToolCallRequest, ...]
+
+    def as_message_param(self) -> ChatCompletionMessageParam:
+        message: dict[str, Any] = {"role": "assistant"}
+        if self.content:
+            message["content"] = self.content
+        if self.tool_calls:
+            message["tool_calls"] = [
+                {
+                    "id": call.id,
+                    "type": "function",
+                    "function": {"name": call.name, "arguments": call.arguments},
+                }
+                for call in self.tool_calls
+            ]
+        return cast(ChatCompletionMessageParam, message)
 
 
 class LlmClient:
@@ -30,28 +70,56 @@ class LlmClient:
             model=self._model,
             messages=messages,
             stream=True,
+            temperature=TEMPERATURE,
+            top_p=TOP_P,
         )
         async for chunk in response:
-            delta = chunk.choices[0].delta.content
-            if delta:
-                yield delta
+            delta = chunk.choices[0].delta
+            if delta.content:
+                yield delta.content
 
     async def complete(self, messages: list[ChatCompletionMessageParam]) -> str:
         """Collects a full streamed response into one string."""
         return "".join([delta async for delta in self.stream(messages)])
 
-    async def complete_with_tools(
+    async def stream_with_tools(
         self,
         messages: list[ChatCompletionMessageParam],
         tools: list[ChatCompletionToolParam],
-    ) -> ChatCompletionMessage:
-        """Non-streaming: reconstructing tool-call argument fragments from a
-        streamed response is real complexity that buys nothing here, since
-        the Thinker protocol this feeds (see agent/tool_loop.py) is already
-        fully blocking. One HTTP round trip per turn."""
+    ) -> AsyncIterator[str | AssistantTurn]:
+        """Yields content deltas as they arrive, then one final AssistantTurn."""
         response = await self._client.chat.completions.create(
             model=self._model,
             messages=messages,
             tools=tools,
+            stream=True,
+            temperature=TEMPERATURE,
+            top_p=TOP_P,
         )
-        return response.choices[0].message
+        content_parts: list[str] = []
+        calls_by_index: dict[int, dict[str, str]] = {}
+        async for chunk in response:
+            if not chunk.choices:
+                continue  # e.g. a final usage-only chunk
+            delta = chunk.choices[0].delta
+            if delta.content:
+                content_parts.append(delta.content)
+                yield delta.content
+            for fragment in delta.tool_calls or []:
+                slot = calls_by_index.setdefault(
+                    fragment.index, {"id": "", "name": "", "arguments": ""}
+                )
+                if fragment.id:
+                    slot["id"] = fragment.id
+                if fragment.function is not None:
+                    if fragment.function.name:
+                        slot["name"] = fragment.function.name
+                    if fragment.function.arguments:
+                        slot["arguments"] += fragment.function.arguments
+        yield AssistantTurn(
+            content="".join(content_parts),
+            tool_calls=tuple(
+                ToolCallRequest(id=slot["id"], name=slot["name"], arguments=slot["arguments"])
+                for _index, slot in sorted(calls_by_index.items())
+            ),
+        )

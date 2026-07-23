@@ -117,18 +117,39 @@ def _build_specs(config: Config) -> list[ManagedProcessSpec]:
                 # without hitting the Mamba cache ceiling.
                 "--max-num-seqs",
                 "8",
-                # ToolLoop (Milestone 2) sends `tools=` on every turn.
-                # Without these, vLLM rejects any request containing
-                # `tools` with a real 400 Bad Request — confirmed directly
-                # on dgx1: the very first conversation silently killed the
-                # voice loop's background task (see voice/loop.py's
-                # _run_thinking fix). qwen3_coder is NVIDIA's documented
+                # ToolLoop sends `tools=` on every turn. Without these,
+                # vLLM rejects any request containing `tools` with a real
+                # 400 Bad Request — confirmed directly on dgx1: the very
+                # first conversation silently killed the voice loop's
+                # background task. qwen3_coder is NVIDIA's documented
                 # tool-call-parser for this model family, including the
-                # NVFP4 quant (vLLM's Nemotron 3 Super blog post, and the
-                # model's own HF discussions).
+                # NVFP4 quant; no Nemotron-specific tool parser exists.
                 "--enable-auto-tool-choice",
                 "--tool-call-parser",
                 "qwen3_coder",
+                # THE VEN-56 root-cause fix. Nemotron 3 has reasoning ON by
+                # default, and its chat template puts the opening <think>
+                # tag in the *prompt* — so without a reasoning parser the
+                # entire trace lands in message.content and gets SPOKEN
+                # (the "recites its own system prompt" symptom), and
+                # generating it (~800-1000 tokens at ~16 tok/s measured in
+                # /tmp/hugo_start.log) was the 40s of dead air. nemotron_v3
+                # is built into vLLM >= 0.20 (0.25.0 installed on dgx1);
+                # it separates the trace into the `reasoning` field, which
+                # the client never speaks (CONTEXT.md: Reasoning trace).
+                "--reasoning-parser",
+                "nemotron_v3",
+                # Thinking off by default server-side: a voice assistant
+                # answers now, not after a thinking budget. Per-request
+                # chat_template_kwargs can still re-enable it later.
+                "--default-chat-template-kwargs",
+                '{"enable_thinking": false}',
+                # MTP speculative decoding from NVIDIA's own DGX Spark
+                # recipe for this exact model: ~16 -> ~23 tok/s decode.
+                # Needs vLLM >= 0.19 (streaming tool-call fix under MTP,
+                # vllm#35615) — 0.25.0 satisfies it.
+                "--speculative-config",
+                '{"method": "mtp", "num_speculative_tokens": 3, "moe_backend": "triton"}',
             ],
             health_check=_http_health_check(config.llm_base_url),
             # A ~80GB MoE model load is realistically minutes, not seconds —
@@ -143,7 +164,10 @@ def _build_specs(config: Config) -> list[ManagedProcessSpec]:
             # confirmed directly on dgx1 that this gets individual nvcc
             # invocations OOM-killed while the ~80GB model is concurrently
             # loading into the same unified memory pool. Capped here.
-            extra_env={"MAX_JOBS": "4"},
+            # VLLM_NVFP4_GEMM_BACKEND=marlin is from NVIDIA's DGX Spark
+            # recipe for this model (pairs with the MTP speculative
+            # config above for the published ~23 tok/s decode).
+            extra_env={"MAX_JOBS": "4", "VLLM_NVFP4_GEMM_BACKEND": "marlin"},
         ),
         ManagedProcessSpec(
             name="stt",
@@ -177,13 +201,15 @@ async def run(config: Config) -> None:
     memory_store = MemoryStore(config.memory_db_path)
     await memory_store.initialize()
 
-    robot = ReachyMiniClient()
+    robot = ReachyMiniClient(playback_gain=config.playback_gain)
     stt = SttClient(config.stt_ws_url)
     await stt.connect()
     tts = TtsClient(config.tts_ws_url)
     await tts.connect()
     llm = LlmClient(base_url=config.llm_base_url, model=config.llm_model)
     web_search = WebSearchTool(config.tavily_api_key)
+
+    stop_event = asyncio.Event()
 
     voice_loop = VoiceLoop(
         robot=robot,
@@ -193,9 +219,17 @@ async def run(config: Config) -> None:
         tts=tts,
         thinker=ToolLoop(llm, web_search=web_search),
         tts_sample_rate_hz=config.tts_sample_rate_hz,
+        no_speech_timeout_s=config.no_speech_timeout_s,
+        follow_up_window_s=config.follow_up_window_s,
+        max_utterance_s=config.max_utterance_s,
+        progress_update_after_s=config.progress_update_after_s,
+        stop_phrases=config.stop_phrases,
+        sleep_phrases=config.sleep_phrases,
+        # Spoken "go to sleep" and `hugo sleep`'s SIGTERM converge on the
+        # same graceful shutdown below (CONTEXT.md: Sleep).
+        on_sleep=stop_event.set,
     )
 
-    stop_event = asyncio.Event()
     running_loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         running_loop.add_signal_handler(sig, stop_event.set)
@@ -210,6 +244,13 @@ async def run(config: Config) -> None:
         await voice_task
     await stt.close()
     await tts.close()
+    # Rest posture before releasing the robot: the physical cue that HUGO
+    # is off (VEN-56). Best-effort — a motor fault must not block the
+    # memory-release guarantee (ADR 0002).
+    try:
+        await robot.goto_sleep()
+    except Exception:
+        logger.exception("failed to move robot to rest posture")
     robot.close()
     await process_manager.stop_all()
     logger.info("hugo stopped, all model memory released")

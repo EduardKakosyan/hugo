@@ -113,10 +113,10 @@ class FakeTtsSession:
         self._chunks = chunks if chunks is not None else [b"a", b"b", b"c", b"d", b"e"]
         self._chunk_delay = chunk_delay
         self.cancelled = False
-        self.spoken_text: str | None = None
+        self.spoken_texts: list[str] = []
 
     async def speak(self, text: str) -> AsyncIterator[bytes]:
-        self.spoken_text = text
+        self.spoken_texts.append(text)
         for chunk in self._chunks:
             if self.cancelled:
                 return
@@ -128,10 +128,18 @@ class FakeTtsSession:
 
 
 class FakeThinker:
-    def __init__(self, response: str = "hello there") -> None:
-        self.response = response
-        self.asked: str | None = None
+    """Streaming Thinker fake: yields each scripted utterance in order,
+    optionally with a delay before each one (to script slow tool calls /
+    slow generation for the progress-nudge and interrupt tests)."""
 
-    async def think(self, user_text: str) -> str:
-        self.asked = user_text
-        return self.response
+    def __init__(self, utterances: list[str] | None = None, delay_before_each: float = 0.0) -> None:
+        self.utterances = utterances if utterances is not None else ["hello there"]
+        self.delay_before_each = delay_before_each
+        self.asked: list[str] = []
+
+    async def think(self, user_text: str) -> AsyncIterator[str]:
+        self.asked.append(user_text)
+        for utterance in self.utterances:
+            if self.delay_before_each:
+                await asyncio.sleep(self.delay_before_each)
+            yield utterance

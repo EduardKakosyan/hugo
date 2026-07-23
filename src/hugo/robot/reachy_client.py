@@ -69,11 +69,16 @@ DAEMON_CONNECT_RETRY_DELAY_S = 20.0
 
 
 class ReachyMiniClient:
-    def __init__(self, use_sim: bool = False) -> None:
+    def __init__(self, use_sim: bool = False, playback_gain: float = 1.0) -> None:
         from reachy_mini import ReachyMini
 
         self._robot = self._connect_with_retries(ReachyMini, use_sim)
         self._media = self._robot.media
+        # Software gain on all speaker output: the media backend exposes no
+        # volume control at all (confirmed by inspecting MediaManager on
+        # dgx1, 2026-07-23), and the robot is audibly too quiet at unity.
+        # Applied in float space with clipping (_float32_to_pcm16 clips).
+        self._playback_gain = playback_gain
         self.input_sample_rate_hz: int = self._media.get_input_audio_samplerate()
         self.output_sample_rate_hz: int = self._media.get_output_audio_samplerate()
         self.input_channels: int = self._media.get_input_channels()
@@ -140,8 +145,14 @@ class ReachyMiniClient:
         await asyncio.to_thread(self._media.audio.clear_player)
 
     async def play_audio(self, pcm16_chunk: bytes) -> None:
-        samples = _upmix_mono(_pcm16_to_float32(pcm16_chunk), self.output_channels)
+        boosted = np.clip(_pcm16_to_float32(pcm16_chunk) * self._playback_gain, -1.0, 1.0)
+        samples = _upmix_mono(boosted.astype(np.float32), self.output_channels)
         await asyncio.to_thread(self._media.push_audio_sample, samples)
+
+    async def goto_sleep(self) -> None:
+        """Moves the robot to its rest posture (the SDK's own sleep pose) —
+        the physical cue that HUGO is off (VEN-56; CONTEXT.md: Sleep)."""
+        await asyncio.to_thread(self._robot.goto_sleep)
 
     def close(self) -> None:
         self._robot.release_media()

@@ -40,6 +40,32 @@ class Config(BaseSettings):
     # this to the robot's actual speaker rate (16kHz on the Reachy Mini).
     tts_sample_rate_hz: int = 24_000
 
+    # Conversation lifecycle (VEN-56; terms in CONTEXT.md). All windows in
+    # seconds. Stop phrases end the conversation (HUGO stays awake); sleep
+    # phrases trigger full shutdown. Matched deterministically on the
+    # transcript, never LLM-interpreted — an accidental sleep costs a
+    # minutes-long model reload.
+    no_speech_timeout_s: float = 8.0
+    follow_up_window_s: float = 6.0
+    max_utterance_s: float = 30.0
+    progress_update_after_s: float = 8.0
+    stop_phrases: list[str] = [
+        "stop",
+        "that's all",
+        "thats all",
+        "that is all",
+        "never mind",
+        "nevermind",
+    ]
+    sleep_phrases: list[str] = ["go to sleep"]
+
+    # Software gain applied to all speaker output (the Reachy Mini media
+    # backend exposes no volume control — confirmed by inspecting
+    # MediaManager on dgx1, 2026-07-23 — and the robot was audibly too
+    # quiet at unity). Applied in float space with clipping; tune on real
+    # hardware.
+    playback_gain: float = 1.0
+
     # v1's only LLM tool (web search, via Tavily). Loads as HUGO_TAVILY_API_KEY
     # like everything else here, even though Tavily's own docs usually expect
     # a bare TAVILY_API_KEY -- passed explicitly into WebSearchTool rather

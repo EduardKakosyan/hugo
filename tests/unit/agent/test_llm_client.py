@@ -1,51 +1,74 @@
 """Tests LlmClient against a fake AsyncOpenAI matching the real SDK's
-streaming chunk shape (chunk.choices[0].delta.content) — no real server."""
+streaming chunk shape (chunk.choices[0].delta with content and tool_calls
+fragments) — no real server."""
 
 from typing import Any
 
 import pytest
 
-from hugo.agent.llm_client import LlmClient
+from hugo.agent.llm_client import AssistantTurn, LlmClient, ToolCallRequest
+
+
+class _FakeFunctionFragment:
+    def __init__(self, name: str | None, arguments: str | None) -> None:
+        self.name = name
+        self.arguments = arguments
+
+
+class _FakeToolCallFragment:
+    def __init__(
+        self,
+        index: int,
+        id: str | None = None,
+        name: str | None = None,
+        arguments: str | None = None,
+    ) -> None:
+        self.index = index
+        self.id = id
+        self.function = _FakeFunctionFragment(name, arguments)
 
 
 class _FakeDelta:
-    def __init__(self, content: str | None) -> None:
+    def __init__(
+        self, content: str | None, tool_calls: list[_FakeToolCallFragment] | None = None
+    ) -> None:
         self.content = content
+        self.tool_calls = tool_calls
 
 
 class _FakeChoice:
-    def __init__(self, content: str | None) -> None:
-        self.delta = _FakeDelta(content)
+    def __init__(self, delta: _FakeDelta) -> None:
+        self.delta = delta
 
 
 class _FakeChunk:
-    def __init__(self, content: str | None) -> None:
-        self.choices = [_FakeChoice(content)]
+    def __init__(self, delta: _FakeDelta | None) -> None:
+        self.choices = [] if delta is None else [_FakeChoice(delta)]
 
 
 class _FakeStream:
-    def __init__(self, deltas: list[str | None]) -> None:
-        self._deltas = deltas
+    def __init__(self, chunks: list[_FakeChunk]) -> None:
+        self._chunks = chunks
 
     def __aiter__(self) -> "_FakeStream":
-        self._iter = iter(self._deltas)
+        self._iter = iter(self._chunks)
         return self
 
     async def __anext__(self) -> _FakeChunk:
         try:
-            return _FakeChunk(next(self._iter))
+            return next(self._iter)
         except StopIteration:
             raise StopAsyncIteration from None
 
 
 class _FakeCompletions:
-    def __init__(self, deltas: list[str | None], calls: list[dict[str, Any]]) -> None:
-        self._deltas = deltas
+    def __init__(self, chunks: list[_FakeChunk], calls: list[dict[str, Any]]) -> None:
+        self._chunks = chunks
         self._calls = calls
 
     async def create(self, **kwargs: Any) -> _FakeStream:
         self._calls.append(kwargs)
-        return _FakeStream(self._deltas)
+        return _FakeStream(self._chunks)
 
 
 class _FakeChat:
@@ -54,25 +77,27 @@ class _FakeChat:
 
 
 class _FakeAsyncOpenAI:
-    def __init__(self, deltas: list[str | None], calls: list[dict[str, Any]]) -> None:
-        self.chat = _FakeChat(_FakeCompletions(deltas, calls))
+    def __init__(self, chunks: list[_FakeChunk], calls: list[dict[str, Any]]) -> None:
+        self.chat = _FakeChat(_FakeCompletions(chunks, calls))
 
 
-@pytest.fixture
-def fake_openai(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str | None], list[dict[str, Any]]]:
-    deltas: list[str | None] = ["Hel", "lo", " there", None]  # a None delta, like real usage tokens
+def _patch_openai(
+    monkeypatch: pytest.MonkeyPatch, chunks: list[_FakeChunk]
+) -> list[dict[str, Any]]:
     calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "hugo.agent.llm_client.AsyncOpenAI",
+        lambda **_kwargs: _FakeAsyncOpenAI(chunks, calls),
+    )
+    return calls
 
-    def factory(**_kwargs: Any) -> _FakeAsyncOpenAI:
-        return _FakeAsyncOpenAI(deltas, calls)
 
-    monkeypatch.setattr("hugo.agent.llm_client.AsyncOpenAI", factory)
-    return deltas, calls
+def _content_chunks(*parts: str | None) -> list[_FakeChunk]:
+    return [_FakeChunk(_FakeDelta(part)) for part in parts]
 
 
-async def test_stream_yields_only_non_empty_deltas(
-    fake_openai: tuple[list[str | None], list[dict[str, Any]]],
-) -> None:
+async def test_stream_yields_only_non_empty_deltas(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_openai(monkeypatch, _content_chunks("Hel", "lo", " there", None))
     client = LlmClient(base_url="http://fake", model="test-model")
 
     parts = [d async for d in client.stream([{"role": "user", "content": "hi"}])]
@@ -80,9 +105,8 @@ async def test_stream_yields_only_non_empty_deltas(
     assert parts == ["Hel", "lo", " there"]
 
 
-async def test_complete_joins_stream_into_one_string(
-    fake_openai: tuple[list[str | None], list[dict[str, Any]]],
-) -> None:
+async def test_complete_joins_stream_into_one_string(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_openai(monkeypatch, _content_chunks("Hel", "lo", " there", None))
     client = LlmClient(base_url="http://fake", model="test-model")
 
     result = await client.complete([{"role": "user", "content": "hi"}])
@@ -90,99 +114,112 @@ async def test_complete_joins_stream_into_one_string(
     assert result == "Hello there"
 
 
-async def test_complete_passes_model_and_stream_flag(
-    fake_openai: tuple[list[str | None], list[dict[str, Any]]],
+async def test_complete_passes_model_stream_flag_and_sampling(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _deltas, calls = fake_openai
+    calls = _patch_openai(monkeypatch, _content_chunks("hi"))
     client = LlmClient(base_url="http://fake", model="my-model")
 
     await client.complete([{"role": "user", "content": "hi"}])
 
     assert calls[0]["model"] == "my-model"
     assert calls[0]["stream"] is True
+    # Nemotron 3's model-card recommended sampling, applied everywhere.
+    assert calls[0]["temperature"] == 1.0
+    assert calls[0]["top_p"] == 0.95
 
 
-class _FakeMessage:
-    def __init__(self, content: str | None, tool_calls: list[Any] | None) -> None:
-        self.content = content
-        self.tool_calls = tool_calls
+async def _collect(client: LlmClient) -> tuple[list[str], AssistantTurn]:
+    deltas: list[str] = []
+    turn: AssistantTurn | None = None
+    async for item in client.stream_with_tools([{"role": "user", "content": "hi"}], tools=[]):
+        if isinstance(item, AssistantTurn):
+            turn = item
+        else:
+            deltas.append(item)
+    assert turn is not None
+    return deltas, turn
 
 
-class _FakeCompletionChoice:
-    def __init__(self, message: _FakeMessage) -> None:
-        self.message = message
+async def test_stream_with_tools_yields_deltas_then_one_assembled_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_openai(monkeypatch, _content_chunks("It's ", "sunny.", None))
+    client = LlmClient(base_url="http://fake", model="test-model")
+
+    deltas, turn = await _collect(client)
+
+    assert deltas == ["It's ", "sunny."]
+    assert turn == AssistantTurn(content="It's sunny.", tool_calls=())
 
 
-class _FakeCompletionResponse:
-    def __init__(self, message: _FakeMessage) -> None:
-        self.choices = [_FakeCompletionChoice(message)]
+async def test_stream_with_tools_accumulates_tool_call_fragments_by_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chunks = [
+        _FakeChunk(_FakeDelta("Checking. ")),
+        _FakeChunk(
+            _FakeDelta(
+                None,
+                [_FakeToolCallFragment(index=0, id="call_1", name="web_search", arguments='{"que')],
+            )
+        ),
+        _FakeChunk(_FakeDelta(None, [_FakeToolCallFragment(index=0, arguments='ry": "x"}')])),
+        _FakeChunk(None),  # e.g. a final usage-only chunk with no choices
+    ]
+    _patch_openai(monkeypatch, chunks)
+    client = LlmClient(base_url="http://fake", model="test-model")
 
+    deltas, turn = await _collect(client)
 
-class _FakeToolCompletions:
-    def __init__(self, message: _FakeMessage, calls: list[dict[str, Any]]) -> None:
-        self._message = message
-        self._calls = calls
-
-    async def create(self, **kwargs: Any) -> _FakeCompletionResponse:
-        self._calls.append(kwargs)
-        return _FakeCompletionResponse(self._message)
-
-
-class _FakeToolChat:
-    def __init__(self, completions: _FakeToolCompletions) -> None:
-        self.completions = completions
-
-
-class _FakeToolAsyncOpenAI:
-    def __init__(self, message: _FakeMessage, calls: list[dict[str, Any]]) -> None:
-        self.chat = _FakeToolChat(_FakeToolCompletions(message, calls))
-
-
-def _patch_openai_for_tools(
-    monkeypatch: pytest.MonkeyPatch, message: _FakeMessage
-) -> list[dict[str, Any]]:
-    calls: list[dict[str, Any]] = []
-    monkeypatch.setattr(
-        "hugo.agent.llm_client.AsyncOpenAI",
-        lambda **_kwargs: _FakeToolAsyncOpenAI(message, calls),
+    assert deltas == ["Checking. "]
+    assert turn.content == "Checking. "
+    assert turn.tool_calls == (
+        ToolCallRequest(id="call_1", name="web_search", arguments='{"query": "x"}'),
     )
-    return calls
 
 
-async def test_complete_with_tools_returns_plain_content_when_no_tool_call(
+async def test_stream_with_tools_passes_tools_and_stream_flag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    message = _FakeMessage(content="hello!", tool_calls=None)
-    _patch_openai_for_tools(monkeypatch, message)
-    client = LlmClient(base_url="http://fake", model="test-model")
-
-    result = await client.complete_with_tools([{"role": "user", "content": "hi"}], tools=[])
-
-    assert result.content == "hello!"
-    assert result.tool_calls is None
-
-
-async def test_complete_with_tools_returns_tool_calls_when_present(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake_tool_call = object()
-    message = _FakeMessage(content=None, tool_calls=[fake_tool_call])
-    _patch_openai_for_tools(monkeypatch, message)
-    client = LlmClient(base_url="http://fake", model="test-model")
-
-    result = await client.complete_with_tools([{"role": "user", "content": "hi"}], tools=[])
-
-    assert result.tool_calls == [fake_tool_call]
-
-
-async def test_complete_with_tools_passes_model_and_tools(monkeypatch: pytest.MonkeyPatch) -> None:
-    message = _FakeMessage(content="ok", tool_calls=None)
-    calls = _patch_openai_for_tools(monkeypatch, message)
+    calls = _patch_openai(monkeypatch, _content_chunks("ok"))
     client = LlmClient(base_url="http://fake", model="my-model")
     tools: list[Any] = [{"type": "function", "function": {"name": "web_search"}}]
 
-    await client.complete_with_tools([{"role": "user", "content": "hi"}], tools=tools)
+    async for _ in client.stream_with_tools([{"role": "user", "content": "hi"}], tools=tools):
+        pass
 
     assert calls[0]["model"] == "my-model"
     assert calls[0]["tools"] == tools
-    assert "stream" not in calls[0]
+    assert calls[0]["stream"] is True
+
+
+def test_assistant_turn_message_param_includes_tool_calls() -> None:
+    turn = AssistantTurn(
+        content="Checking.",
+        tool_calls=(ToolCallRequest(id="call_1", name="web_search", arguments="{}"),),
+    )
+
+    message = turn.as_message_param()
+
+    assert message == {
+        "role": "assistant",
+        "content": "Checking.",
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "web_search", "arguments": "{}"},
+            }
+        ],
+    }
+
+
+def test_assistant_turn_message_param_omits_empty_content() -> None:
+    turn = AssistantTurn(
+        content="", tool_calls=(ToolCallRequest(id="c", name="web_search", arguments="{}"),)
+    )
+
+    message = turn.as_message_param()
+
+    assert "content" not in message

@@ -93,7 +93,9 @@ def test_build_specs_names_and_commands(tmp_path: Path) -> None:
     # caused a real "Address already in use" collision with the Reachy
     # Mini daemon's own default port on dgx1. --gpu-memory-utilization
     # matters too: vLLM's own default starves STT/TTS out of GPU memory
-    # afterward, confirmed via a real CUDA OOM on dgx1.
+    # afterward, confirmed via a real CUDA OOM on dgx1. The reasoning
+    # parser + thinking-off defaults are THE VEN-56 root-cause fix: without
+    # them the reasoning trace lands in message.content and gets spoken.
     assert vllm_spec.command == [
         str(tmp_path / ".venv-vllm" / "bin" / "vllm"),
         "serve",
@@ -107,7 +109,15 @@ def test_build_specs_names_and_commands(tmp_path: Path) -> None:
         "--enable-auto-tool-choice",
         "--tool-call-parser",
         "qwen3_coder",
+        "--reasoning-parser",
+        "nemotron_v3",
+        "--default-chat-template-kwargs",
+        '{"enable_thinking": false}',
+        "--speculative-config",
+        '{"method": "mtp", "num_speculative_tokens": 3, "moe_backend": "triton"}',
     ]
+    assert vllm_spec.extra_env is not None
+    assert vllm_spec.extra_env["VLLM_NVFP4_GEMM_BACKEND"] == "marlin"
 
     stt_spec = specs[1]
     assert stt_spec.command == [
