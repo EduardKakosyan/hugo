@@ -334,7 +334,8 @@ async def run(config: Config) -> None:
             vad=SpeechActivityDetector(),
             stt=stt,
             tts=tts,
-            thinker=ToolLoop(llm, web_search=web_search),
+            # The reply's mood tag steers the speaking gestures (VEN-57).
+            thinker=ToolLoop(llm, web_search=web_search, on_mood=motion.set_mood),
             tts_sample_rate_hz=config.tts_sample_rate_hz,
             no_speech_timeout_s=config.no_speech_timeout_s,
             follow_up_window_s=config.follow_up_window_s,

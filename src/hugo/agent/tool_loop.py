@@ -22,7 +22,7 @@ voice loop's task).
 import json
 import logging
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 
 import httpx
 from openai.types.chat import ChatCompletionMessageParam
@@ -52,8 +52,20 @@ DEFAULT_SYSTEM_PROMPT = (
     "short sentence telling the user what you're about to do. When you "
     "use web search, weave what you found into a natural spoken answer "
     "and name the source briefly rather than citing links. If you don't "
-    "know something or a search comes up empty, say so plainly."
+    "know something or a search comes up empty, say so plainly. "
+    "Start every reply with exactly one mood tag in square brackets — "
+    "[neutral], [cheerful], [thoughtful], [apologetic], [excited], or "
+    "[curious] — matching what you're about to say; it drives your body "
+    "language. The tag is removed before your words are spoken: never "
+    "mention it or read it aloud."
 )
+
+# Spoken-mood vocabulary the model tags each reply with (VEN-57): the main
+# LLM is the "model that thinks about movement" — it already knows what
+# it's about to say, so a tag costs a few tokens where a separate model
+# would burn shared-box memory to guess at the same information.
+MOODS = ("neutral", "cheerful", "thoughtful", "apologetic", "excited", "curious")
+_MOOD_TAG = re.compile(r"\[(" + "|".join(MOODS) + r")\]\s*", re.IGNORECASE)
 
 _MAX_TOOL_ITERATIONS = 4
 
@@ -113,13 +125,29 @@ class ToolLoop:
         llm: LlmClient,
         web_search: WebSearchTool,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+        on_mood: Callable[[str], None] | None = None,
     ) -> None:
         self._llm = llm
         self._web_search = web_search
+        self._on_mood = on_mood
         self._history: list[ChatCompletionMessageParam] = [
             {"role": "system", "content": system_prompt}
         ]
         self._acknowledgment_count = 0
+
+    def _strip_mood(self, text: str) -> str:
+        """Removes mood tags from an outgoing utterance, reporting the
+        first to on_mood. Runs on EVERY spoken path: a tag must never
+        reach TTS — same discipline as reasoning traces (CONTEXT.md)."""
+        tags = _MOOD_TAG.findall(text)
+        if not tags:
+            return text
+        if self._on_mood is not None:
+            try:
+                self._on_mood(tags[0].lower())
+            except Exception:
+                logger.exception("mood callback failed; continuing")
+        return _MOOD_TAG.sub("", text)
 
     async def think(self, user_text: str) -> AsyncIterator[str]:
         """Yields utterances to speak, in order, while the turn runs."""
@@ -143,13 +171,13 @@ class ToolLoop:
                     turn = item
                     continue
                 for sentence in sentences.feed(item):
-                    if spoken := speechify(sentence):
+                    if spoken := speechify(self._strip_mood(sentence)):
                         spoke_any = True
                         yield spoken
             assert turn is not None, "stream_with_tools must end with an AssistantTurn"
             self._history.append(turn.as_message_param())
 
-            if remainder := speechify(sentences.flush()):
+            if remainder := speechify(self._strip_mood(sentences.flush())):
                 spoke_any = True
                 yield remainder
 

@@ -188,3 +188,48 @@ def test_speechify_strips_markdown_and_bullets() -> None:
         == "Here you go: first thing second thing third"
     )
     assert speechify("  plain sentence stays put.  ") == "plain sentence stays put."
+
+
+async def test_mood_tag_is_stripped_reported_and_never_spoken() -> None:
+    moods: list[str] = []
+    llm = _FakeStreamingLlm(
+        [(["[cheerful] Grea", "t news. It works."], _turn("[cheerful] Great news. It works."))]
+    )
+    loop = ToolLoop(llm, web_search=_FakeWebSearchTool(), on_mood=moods.append)  # type: ignore[arg-type]
+
+    utterances = await _think_all(loop, "did it work")
+
+    # The tag steers body language and must NEVER reach TTS — the same
+    # discipline as reasoning traces.
+    assert utterances == ["Great news.", "It works."]
+    assert moods == ["cheerful"]
+
+
+async def test_untagged_reply_speaks_unchanged_with_no_mood_report() -> None:
+    moods: list[str] = []
+    llm = _FakeStreamingLlm([(["Plain answer."], _turn("Plain answer."))])
+    loop = ToolLoop(llm, web_search=_FakeWebSearchTool(), on_mood=moods.append)  # type: ignore[arg-type]
+
+    assert await _think_all(loop, "hi") == ["Plain answer."]
+    assert moods == []
+
+
+async def test_tag_on_its_own_line_is_not_spoken_as_an_empty_utterance() -> None:
+    moods: list[str] = []
+    llm = _FakeStreamingLlm(
+        [(["[thoughtful]\n", "Well, maybe."], _turn("[thoughtful]\nWell, maybe."))]
+    )
+    loop = ToolLoop(llm, web_search=_FakeWebSearchTool(), on_mood=moods.append)  # type: ignore[arg-type]
+
+    assert await _think_all(loop, "hmm") == ["Well, maybe."]
+    assert moods == ["thoughtful"]
+
+
+async def test_mood_callback_failure_never_breaks_speech() -> None:
+    def boom(mood: str) -> None:
+        raise RuntimeError("motion layer exploded")
+
+    llm = _FakeStreamingLlm([(["[excited] Yes."], _turn("[excited] Yes."))])
+    loop = ToolLoop(llm, web_search=_FakeWebSearchTool(), on_mood=boom)  # type: ignore[arg-type]
+
+    assert await _think_all(loop, "hi") == ["Yes."]

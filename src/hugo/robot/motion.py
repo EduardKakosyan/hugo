@@ -9,7 +9,10 @@ Maps conversation state (cues from the voice loop) to expressive motion:
     attentive         perk (goto) then hold still
     user_speech_hold  frozen while the user talks
     thinking          subtle one-antenna sway filling STT+LLM latency
-    speaking          antenna wag + a gentle procedural head nod
+                      (which antenna / depth / tempo re-rolled per turn)
+    speaking          mood-steered antenna wag + gentle head nod: the LLM
+                      tags each reply ([cheerful], [thoughtful], ... —
+                      see tool_loop) and the tag picks the SpeakingStyle
 
 Amplitudes are deliberately small: the ecosystem-canonical values were
 tried live and read as far too much motion on a desk at arm's length —
@@ -55,6 +58,8 @@ import asyncio
 import contextlib
 import logging
 import math
+import random
+from dataclasses import dataclass
 from typing import Literal
 
 from hugo.robot.motion_io import HeadOffsets, MotionCue, RobotMotion
@@ -86,16 +91,46 @@ PERK_DURATION_S = 0.4
 REJOIN_DURATION_S = 0.3
 NEUTRAL_RETURN_S = 1.0
 
-# Thinking: the right antenna droops a little and sways slowly — "hmm".
+# Thinking: one antenna droops a little and sways slowly — "hmm". Base
+# values; each entry jitters them (and picks which antenna muses) via the
+# manager's rng so consecutive turns don't look copy-pasted.
 THINKING_ANTENNA_CENTER_RAD = -0.2
 THINKING_ANTENNA_AMPLITUDE_RAD = math.radians(3)
 THINKING_ANTENNA_FREQ_HZ = 0.4
 
-# Speaking: brisk but small antenna wag + a gentle head nod around the
-# attentive pose (our own controllable stand-in for the SDK wobbler).
-WAG_AMPLITUDE_RAD = math.radians(5)
-WAG_FREQ_HZ = 1.2
-SPEAK_NOD_AMPLITUDE_RAD = math.radians(1.5)
+
+@dataclass(frozen=True)
+class SpeakingStyle:
+    """How the body talks: antenna wag + gentle head nod around the
+    attentive pose (our controllable stand-in for the SDK wobbler).
+    antenna_lift_rad raises (+) or droops (-) both antennas from the
+    attentive stance while the mood lasts."""
+
+    wag_freq_hz: float
+    wag_amplitude_rad: float
+    nod_amplitude_rad: float
+    antenna_lift_rad: float
+
+
+# Keyed by the LLM's reply mood tag (tool_loop.MOODS): the model already
+# knows what it's about to say, so IT picks how the body says it — no
+# separate "movement model" needed (VEN-57). All values stay inside the
+# small-motion discipline.
+SPEAKING_STYLES: dict[str, SpeakingStyle] = {
+    "neutral": SpeakingStyle(1.2, math.radians(5), math.radians(1.5), 0.0),
+    "cheerful": SpeakingStyle(1.6, math.radians(6), math.radians(2.0), math.radians(4)),
+    "excited": SpeakingStyle(2.0, math.radians(7), math.radians(2.5), math.radians(6)),
+    "thoughtful": SpeakingStyle(0.7, math.radians(3), math.radians(1.0), -math.radians(4)),
+    "apologetic": SpeakingStyle(0.6, math.radians(2.5), math.radians(1.0), -math.radians(8)),
+    "curious": SpeakingStyle(1.0, math.radians(4), math.radians(1.5), math.radians(2)),
+}
+
+
+def speaking_style(mood: str) -> SpeakingStyle:
+    """Unknown/garbled tags fall back to neutral — the LLM free-texts the
+    tag, so this must never raise."""
+    return SPEAKING_STYLES.get(mood, SPEAKING_STYLES["neutral"])
+
 
 # Send-deadband and slew limits (community-measured values).
 TRANSLATION_DEADBAND_M = 0.0005
@@ -182,6 +217,7 @@ class MotionManager:
         tick_s: float = TICK_S,
         use_wobbler: bool = False,
         use_head_tracking: bool = False,
+        rng: random.Random | None = None,
     ) -> None:
         self._robot = robot
         self._tick_s = tick_s
@@ -189,6 +225,16 @@ class MotionManager:
         # the live failure that parked them.
         self._use_wobbler = use_wobbler
         self._use_head_tracking = use_head_tracking
+        # Injected for deterministic tests; jitters gesture parameters per
+        # state entry so motion never feels copy-pasted between turns.
+        self._rng = rng if rng is not None else random.Random()
+        self._mood = "neutral"
+        self._think_right = True
+        self._think_center_rad = THINKING_ANTENNA_CENTER_RAD
+        self._think_amplitude_rad = THINKING_ANTENNA_AMPLITUDE_RAD
+        self._think_freq_hz = THINKING_ANTENNA_FREQ_HZ
+        self._speak_freq_jitter = 1.0
+        self._speak_phase = 0.0
         self.state: MotionState = "idle"
         self._pending_cue: MotionCue | None = None
         self._cue_event = asyncio.Event()
@@ -232,6 +278,12 @@ class MotionManager:
         self._pending_cue = cue
         self._cue_event.set()
 
+    def set_mood(self, mood: str) -> None:
+        """From the LLM's reply tag, via the tool loop: steers the
+        speaking style from the next tick. Unknown tags mean neutral;
+        never raises (the tag is model-generated free text)."""
+        self._mood = mood if mood in SPEAKING_STYLES else "neutral"
+
     async def _run(self) -> None:
         while True:
             with contextlib.suppress(TimeoutError):
@@ -264,6 +316,7 @@ class MotionManager:
             self._sent_head, self._sent_antennas = ATTENTIVE_HEAD, ATTENTIVE_ANTENNAS
             if self._use_head_tracking:
                 await self._robot.set_head_tracking(1.0)
+            self._mood = "neutral"
             self.state = "attentive"
         elif cue == "listening":
             # Follow-up window reopening: no re-perk, just settle the
@@ -284,9 +337,20 @@ class MotionManager:
                 await self._robot.set_head_tracking(0.0)
             self.state = "user_speech_hold"
         elif cue == "thinking":
+            # A fresh "hmm" every turn: which antenna muses, how deep the
+            # droop, how fast the sway — never the same twice in a row.
+            self._think_right = self._rng.random() < 0.5
+            self._think_center_rad = THINKING_ANTENNA_CENTER_RAD * self._rng.uniform(0.7, 1.2)
+            self._think_amplitude_rad = THINKING_ANTENNA_AMPLITUDE_RAD * self._rng.uniform(0.7, 1.3)
+            self._think_freq_hz = THINKING_ANTENNA_FREQ_HZ * self._rng.uniform(0.7, 1.3)
             self._phase_started_at = now
             self.state = "thinking"
         elif cue == "speaking":
+            # The mood (set by the reply's tag just before first audio)
+            # picks the style; jitter keeps identical moods from looking
+            # identical.
+            self._speak_freq_jitter = self._rng.uniform(0.85, 1.15)
+            self._speak_phase = self._rng.uniform(0.0, 2.0 * math.pi)
             self._phase_started_at = now
             self.state = "speaking"
         elif cue == "conversation_end":
@@ -294,23 +358,27 @@ class MotionManager:
                 await self._robot.stop_head_tracking()
             await self._robot.goto(NEUTRAL_HEAD, NEUTRAL_ANTENNAS, NEUTRAL_RETURN_S)
             self._sent_head, self._sent_antennas = NEUTRAL_HEAD, NEUTRAL_ANTENNAS
+            self._mood = "neutral"
             self._phase_started_at = now
             self.state = "idle"
 
     async def _tick(self) -> None:
         t = asyncio.get_running_loop().time() - self._phase_started_at
         if self.state == "thinking":
-            sway = math.sin(2 * math.pi * THINKING_ANTENNA_FREQ_HZ * t)
-            await self._send(
-                None,
-                (
-                    THINKING_ANTENNA_CENTER_RAD + THINKING_ANTENNA_AMPLITUDE_RAD * sway,
-                    ATTENTIVE_ANTENNAS[1],
-                ),
-            )
+            sway = math.sin(2 * math.pi * self._think_freq_hz * t)
+            # Signed in the right antenna's convention; mirrored for left.
+            droop = self._think_center_rad + self._think_amplitude_rad * sway
+            if self._think_right:
+                antennas = (droop, ATTENTIVE_ANTENNAS[1])
+            else:
+                antennas = (ATTENTIVE_ANTENNAS[0], -droop)
+            await self._send(None, antennas)
         elif self.state == "speaking":
-            phase = math.sin(2 * math.pi * WAG_FREQ_HZ * t)
-            wag = WAG_AMPLITUDE_RAD * phase
+            style = speaking_style(self._mood)
+            phase = math.sin(
+                2 * math.pi * style.wag_freq_hz * self._speak_freq_jitter * t + self._speak_phase
+            )
+            wag = style.wag_amplitude_rad * phase
             head: HeadOffsets | None = None
             if not self._use_head_tracking:
                 # With tracking off the head is ours: a gentle nod around
@@ -319,9 +387,17 @@ class MotionManager:
                 # wild on this robot, live 2026-07-23).
                 head = HeadOffsets(
                     z_m=ATTENTIVE_HEAD.z_m,
-                    pitch_rad=ATTENTIVE_HEAD.pitch_rad + SPEAK_NOD_AMPLITUDE_RAD * phase,
+                    pitch_rad=ATTENTIVE_HEAD.pitch_rad + style.nod_amplitude_rad * phase,
                 )
-            await self._send(head, (ATTENTIVE_ANTENNAS[0] + wag, ATTENTIVE_ANTENNAS[1] + wag))
+            await self._send(
+                head,
+                (
+                    # Lift is toward-vertical for both antennas (their signs
+                    # mirror); the wag rides on top, same-signed = seesaw.
+                    ATTENTIVE_ANTENNAS[0] + style.antenna_lift_rad + wag,
+                    ATTENTIVE_ANTENNAS[1] - style.antenna_lift_rad + wag,
+                ),
+            )
         # "idle", "attentive" and "user_speech_hold" deliberately send
         # nothing: stillness is the behavior (and while attentive/held the
         # head belongs to the perk pose, tracking, or the held anchor).

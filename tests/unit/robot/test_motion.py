@@ -15,11 +15,13 @@ from hugo.robot.motion import (
     NEUTRAL_HEAD,
     NEUTRAL_RETURN_S,
     PERK_DURATION_S,
+    SPEAKING_STYLES,
     MotionManager,
     antennas_if_changed,
     head_if_changed,
     slew_limited_antennas,
     slew_limited_head,
+    speaking_style,
 )
 from hugo.robot.motion_io import HeadOffsets
 
@@ -298,3 +300,24 @@ def test_antenna_slew_eases_state_change_snaps() -> None:
     eased = slew_limited_antennas((-0.06, 0.06), (-0.5, 0.06))
     assert eased == (-0.06 - MAX_ANTENNA_PER_TICK_RAD, 0.06)
     assert slew_limited_antennas(None, (-0.5, 0.06)) == (-0.5, 0.06)
+
+
+def test_speaking_style_lookup_never_raises_and_falls_back_to_neutral() -> None:
+    assert speaking_style("banana") == SPEAKING_STYLES["neutral"]
+    assert speaking_style("") == SPEAKING_STYLES["neutral"]
+    assert speaking_style("excited").wag_freq_hz > SPEAKING_STYLES["neutral"].wag_freq_hz
+    assert speaking_style("apologetic").antenna_lift_rad < 0
+
+
+async def test_unknown_mood_is_safe_and_speaking_still_ticks() -> None:
+    manager, robot = _build()
+    await manager.start()
+    try:
+        manager.set_mood("nonsense-from-the-llm")
+        manager.cue("wake")
+        await _wait_until(lambda: manager.state == "attentive")
+        before = len(robot.targets())
+        manager.cue("speaking")
+        await _wait_until(lambda: len(robot.targets()) >= before + 2)
+    finally:
+        await manager.stop()
