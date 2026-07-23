@@ -1,20 +1,19 @@
 # HUGO's ear while it sleeps: a tiny CPU-only wake-word listener that
 # starts hugo.service when it hears the wake word (VEN-56 wake-from-sleep).
-# Mutually exclusive with hugo.service via Conflicts= — starting either
-# stops the other, so the robot's single-owner media pipeline never has
-# two claimants. hugo.service's ExecStopPost restores this listener after
-# every sleep or crash.
+# Runs PERMANENTLY and self-gates on hugo.service's state in code (it
+# only holds the robot mic while hugo is down) — an earlier Conflicts=/
+# ExecStopPost design made `systemctl restart hugo` cancel its own start
+# job (observed live, 2026-07-23).
 
 [Unit]
 Description=HUGO wake-word listener (starts hugo on wake word while asleep)
-Conflicts=hugo.service
 
 [Service]
 Type=simple
 WorkingDirectory=%h/hugo
 EnvironmentFile=%h/.hugo_secrets
 ExecStart=%h/hugo/.venv/bin/hugo wake-listener
-Restart=on-failure
+Restart=always
 RestartSec=5
 
 [Install]

@@ -1,25 +1,29 @@
 """Always-on minimal wake listener — HUGO's ear while it sleeps (VEN-56
 follow-up: "hey jarvis" must wake it from a full sleep).
 
-Runs as its own systemd user service (deploy/hugo-wake.service) whenever
-the full stack is down. Footprint is deliberately tiny — the wake-word
-model on CPU and the robot mic, no GPU, no model servers — so it doesn't
-meaningfully dent the shared box's memory (ADR 0002's spirit holds: the
-121GB pool stays free while HUGO sleeps).
+Runs permanently as its own systemd user service (deploy/hugo-wake.service)
+and SELF-GATES on hugo.service's state rather than using unit Conflicts=:
+an earlier Conflicts+ExecStopPost design made `systemctl restart hugo`
+cancel its own start job (observed live, 2026-07-23). While hugo is
+active or activating, this just polls; while hugo is down, it holds the
+robot mic and listens. Footprint is deliberately tiny — the wake-word
+model on CPU, no GPU, no model servers — so the 121GB pool stays free
+while HUGO sleeps (ADR 0002's spirit holds).
 
 On detection it plays the wake chime (the audible "heard you — waking
-up"; the full model load takes minutes), releases the robot's media
-pipeline so the starting orchestrator can claim it, and asks systemd to
-start hugo. The units are mutually exclusive via Conflicts=, and
-hugo.service's ExecStopPost restores this listener after every sleep or
-crash — the ear is never left off.
+up"; the full model load takes minutes; the voice loop speaks "I'm
+awake." when it's actually ready), releases the robot's single-owner
+media pipeline, and asks systemd to start hugo. If hugo starts by other
+means (CLI, another terminal), the poll notices and the mic is released
+just the same.
 """
 
 import asyncio
+import contextlib
 import logging
 import subprocess
 
-from hugo.config import load_config
+from hugo.config import Config, load_config
 from hugo.logging_setup import configure_logging
 from hugo.robot.audio_io import RobotAudioIO
 from hugo.voice.chime import wake_chime_pcm16
@@ -30,6 +34,7 @@ logger = logging.getLogger(__name__)
 # Lets the chime drain through the robot's playback queue before the
 # media pipeline is released.
 _CHIME_DRAIN_S = 0.6
+_POLL_INTERVAL_S = 5.0
 
 
 async def listen_until_wake(robot: RobotAudioIO, wake_word: WakeWordListener) -> None:
@@ -43,30 +48,81 @@ async def listen_until_wake(robot: RobotAudioIO, wake_word: WakeWordListener) ->
             return
 
 
-async def run() -> None:
+async def _hugo_service_state() -> str:
+    proc = await asyncio.create_subprocess_exec(
+        "systemctl",
+        "--user",
+        "is-active",
+        "hugo.service",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    stdout, _ = await proc.communicate()
+    return stdout.decode().strip()
+
+
+def _is_up(state: str) -> bool:
+    # "activating" counts as up: hugo's robot connect starts early in its
+    # minutes-long startup, and the media pipeline is single-owner.
+    return state in ("active", "activating", "reloading")
+
+
+async def _wait_until_hugo_up() -> None:
+    # Genuine polling of external state (systemd) — there is no event to
+    # await, hence the ASYNC110 suppression.
+    while not _is_up(await _hugo_service_state()):  # noqa: ASYNC110
+        await asyncio.sleep(_POLL_INTERVAL_S)
+
+
+async def _listen_while_hugo_down(config: Config) -> bool:
+    """Holds the mic until the wake word fires (True) or hugo comes up by
+    other means (False). Releases the media pipeline either way."""
     from hugo.robot.reachy_client import ReachyMiniClient
     from hugo.voice.wake_word import WakeWordDetector
 
-    config = load_config()
     robot = ReachyMiniClient(playback_gain=config.playback_gain)
     wake_word = WakeWordDetector(model_name=config.wake_word)
     await robot.start_recording()
     await robot.start_playing()
+    listen_task = asyncio.ensure_future(listen_until_wake(robot, wake_word))
+    hugo_up_task = asyncio.ensure_future(_wait_until_hugo_up())
     try:
         logger.info("asleep and listening — say '%s' to wake hugo", config.wake_word)
-        await listen_until_wake(robot, wake_word)
+        done, pending = await asyncio.wait(
+            {listen_task, hugo_up_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        return listen_task in done
     finally:
-        # Release the mic/speaker BEFORE hugo starts: the orchestrator's
-        # robot connect races this exit, and the media pipeline is
-        # single-owner.
         await robot.stop_recording()
         robot.close()
-    logger.info("starting hugo")
-    await asyncio.to_thread(
-        subprocess.run,
-        ["systemctl", "--user", "start", "--no-block", "hugo.service"],
-        check=True,
-    )
+
+
+async def run() -> None:
+    config = load_config()
+    while True:
+        if _is_up(await _hugo_service_state()):
+            await asyncio.sleep(_POLL_INTERVAL_S)
+            continue
+        try:
+            woke = await _listen_while_hugo_down(config)
+        except Exception:
+            logger.exception("listener cycle failed; retrying shortly")
+            await asyncio.sleep(_POLL_INTERVAL_S * 2)
+            continue
+        if woke:
+            logger.info("starting hugo")
+            await asyncio.to_thread(
+                subprocess.run,
+                ["systemctl", "--user", "start", "--no-block", "hugo.service"],
+                check=True,
+            )
+            # Give systemd time to flip the unit into "activating" so the
+            # next poll gates correctly.
+            await asyncio.sleep(_POLL_INTERVAL_S)
 
 
 def main() -> None:

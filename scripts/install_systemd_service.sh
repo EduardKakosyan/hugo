@@ -20,9 +20,10 @@ mkdir -p "$unit_dir"
 cp "$repo_root/deploy/hugo.service" "$unit_dir/hugo.service"
 cp "$repo_root/deploy/hugo-wake.service" "$unit_dir/hugo-wake.service"
 systemctl --user daemon-reload
-# The wake listener starts at boot and after every hugo stop, so the wake
-# word always works — even from a full sleep.
+# The wake listener runs permanently (it self-gates on hugo's state), so
+# the wake word always works — even from a full sleep.
 systemctl --user enable hugo-wake.service >/dev/null 2>&1 || true
+systemctl --user start --no-block hugo-wake.service >/dev/null 2>&1 || true
 
 echo "installed: $unit_dir/hugo.service and hugo-wake.service"
 echo "  start:  systemctl --user start hugo"
