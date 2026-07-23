@@ -87,7 +87,14 @@ State = Literal["IDLE", "LISTENING", "RESPONDING"]
 # request, "stop" is a command.
 STOP_PHRASES = ("stop", "that's all", "thats all", "that is all", "never mind", "nevermind")
 SLEEP_PHRASES = ("go to sleep",)
-SLEEP_CONFIRMATION = "Going to sleep."
+# Sets expectations for the wake-from-sleep arc while the voice is still
+# loaded to say it: waking is chime -> minutes of silent model loading ->
+# stand up + "I'm awake". Without this warning, the silent window reads
+# as "it won't wake up no matter how many times I say it" (live user
+# report, 2026-07-23 — the wake word had actually fired within seconds).
+SLEEP_CONFIRMATION = (
+    "Going to sleep. Wake me with the wake word, then give me a few minutes to warm up."
+)
 PROGRESS_NUDGE = "Still working on it."
 THINKER_FAILURE_APOLOGY = "Sorry, I ran into a problem thinking about that."
 
