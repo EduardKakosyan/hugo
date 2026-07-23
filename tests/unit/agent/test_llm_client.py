@@ -198,7 +198,7 @@ async def test_stream_with_tools_omits_an_empty_tools_array(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # vLLM 0.25 rejects `tools: []` with a 400 — found live on dgx1.
-    from openai import NOT_GIVEN
+    from openai import omit
 
     calls = _patch_openai(monkeypatch, _content_chunks("ok"))
     client = LlmClient(base_url="http://fake", model="my-model")
@@ -206,7 +206,7 @@ async def test_stream_with_tools_omits_an_empty_tools_array(
     async for _ in client.stream_with_tools([{"role": "user", "content": "hi"}], tools=[]):
         pass
 
-    assert calls[0]["tools"] is NOT_GIVEN
+    assert calls[0]["tools"] is omit
 
 
 def test_assistant_turn_message_param_includes_tool_calls() -> None:
