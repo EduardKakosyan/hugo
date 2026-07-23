@@ -63,6 +63,12 @@ Manual fallback (never `setsid` — see gotchas):
   ↔ resident-services balance (comments in `orchestrator._build_specs`).
 - `dmesg` is restricted for `jim` — kernel OOM kills are invisible; infer
   from silent process death + `free -g`.
+- The reachy daemon SPLITS mic frames across concurrent media clients
+  instead of refusing the second one — two claimants each get ~half the
+  audio, silently. Symptom: wake-word scores pinned near 0 despite
+  speech. Never let hugo and the wake listener (or any tool) hold media
+  at once; after deploys, RESTART hugo-wake (start is a no-op on running
+  services and a stale listener caused exactly this, 2026-07-23).
 
 ## Testing
 

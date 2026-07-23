@@ -21,9 +21,13 @@ cp "$repo_root/deploy/hugo.service" "$unit_dir/hugo.service"
 cp "$repo_root/deploy/hugo-wake.service" "$unit_dir/hugo-wake.service"
 systemctl --user daemon-reload
 # The wake listener runs permanently (it self-gates on hugo's state), so
-# the wake word always works — even from a full sleep.
+# the wake word always works — even from a full sleep. RESTART, not
+# start: start is a no-op on a running service, and a stale listener
+# surviving a deploy held the robot mic alongside hugo for 34 minutes —
+# the daemon silently SPLITS mic frames across concurrent media clients,
+# which left hugo's wake detector half-deaf (live on dgx1, 2026-07-23).
 systemctl --user enable hugo-wake.service >/dev/null 2>&1 || true
-systemctl --user start --no-block hugo-wake.service >/dev/null 2>&1 || true
+systemctl --user restart hugo-wake.service >/dev/null 2>&1 || true
 
 echo "installed: $unit_dir/hugo.service and hugo-wake.service"
 echo "  start:  systemctl --user start hugo"
