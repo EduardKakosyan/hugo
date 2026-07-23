@@ -201,6 +201,13 @@ def _build_specs(config: Config) -> list[list[ManagedProcessSpec]]:
                 # concurrency keeps the second pass inside the pool.
                 "--model-loader-extra-config",
                 '{"concurrency": 8, "memory_limit": 4294967296}',
+                # The model default is 262144 — 1.88GiB of KV cache per
+                # max-length request, which made KV sizing fail outright
+                # on the shared pool (live on dgx1 2026-07-23). A voice
+                # conversation is a few thousand tokens; 32k is ~8x
+                # headroom over any real session at 1/8th the KV demand.
+                "--max-model-len",
+                "32768",
             ],
             health_check=_http_health_check(config.llm_base_url),
             # A ~80GB MoE model load is realistically minutes, not seconds —
@@ -241,6 +248,22 @@ async def run(config: Config) -> None:
     robot_task = asyncio.create_task(
         asyncio.to_thread(ReachyMiniClient, playback_gain=config.playback_gain)
     )
+
+    async def keep_checkpoint_out_of_page_cache() -> None:
+        # vLLM sizes its KV cache from *free* memory at profile time, and
+        # on unified memory the checkpoint file pages the streamer has
+        # already consumed count against it — measured live on dgx1
+        # (2026-07-23): 17GB of buff/cache at profiling collapsed the KV
+        # pool to 0.15GiB and engine init failed. Evict continuously while
+        # the servers come up; re-reading a not-yet-consumed page costs
+        # ~nothing at the NVMe's measured 4.6GB/s. The vllm spec's
+        # after_healthy hook does the final sweep.
+        checkpoint_dir = hf_model_cache_dir(config.llm_model)
+        while True:
+            await asyncio.to_thread(evict_directory_from_page_cache, checkpoint_dir)
+            await asyncio.sleep(15.0)
+
+    eviction_task = asyncio.create_task(keep_checkpoint_out_of_page_cache())
     try:
         await process_manager.start_stages(_build_specs(config))
     except BaseException:
@@ -251,6 +274,10 @@ async def run(config: Config) -> None:
         with contextlib.suppress(BaseException):
             (await robot_task).close()
         raise
+    finally:
+        eviction_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await eviction_task
     logger.info("model servers healthy")
 
     # Everything past server startup runs under this try/finally: a
