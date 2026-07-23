@@ -18,7 +18,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, cast
 
-from openai import AsyncOpenAI
+from openai import NOT_GIVEN, AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageParam, ChatCompletionToolParam
 
 DEFAULT_API_KEY = "not-needed"
@@ -91,7 +91,10 @@ class LlmClient:
         response = await self._client.chat.completions.create(
             model=self._model,
             messages=messages,
-            tools=tools,
+            # vLLM 0.25 rejects `tools: []` with a real 400 ("must not be an
+            # empty array") — found live on dgx1 2026-07-23. Omit the field
+            # entirely when there are no tools.
+            tools=tools or NOT_GIVEN,
             stream=True,
             temperature=TEMPERATURE,
             top_p=TOP_P,

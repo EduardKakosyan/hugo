@@ -194,6 +194,21 @@ async def test_stream_with_tools_passes_tools_and_stream_flag(
     assert calls[0]["stream"] is True
 
 
+async def test_stream_with_tools_omits_an_empty_tools_array(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # vLLM 0.25 rejects `tools: []` with a 400 — found live on dgx1.
+    from openai import NOT_GIVEN
+
+    calls = _patch_openai(monkeypatch, _content_chunks("ok"))
+    client = LlmClient(base_url="http://fake", model="my-model")
+
+    async for _ in client.stream_with_tools([{"role": "user", "content": "hi"}], tools=[]):
+        pass
+
+    assert calls[0]["tools"] is NOT_GIVEN
+
+
 def test_assistant_turn_message_param_includes_tool_calls() -> None:
     turn = AssistantTurn(
         content="Checking.",
