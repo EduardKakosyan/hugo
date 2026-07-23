@@ -93,7 +93,7 @@ mypy_path = "src"
 # dependency group) — type-check modules that use them as Any rather than
 # requiring the packages to be present just for mypy.
 [[tool.mypy.overrides]]
-module = ["nemo.*", "vllm.*", "qwen_tts.*", "reachy_mini.*", "openwakeword.*", "silero_vad.*", "pyaec.*"]
+module = ["nemo.*", "vllm.*", "qwen_tts.*", "faster_qwen3_tts.*", "reachy_mini.*", "openwakeword.*", "silero_vad.*", "pyaec.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

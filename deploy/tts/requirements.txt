@@ -1,6 +1,8 @@
-# Verified working on dgx1 (aarch64, CUDA 13.0.3, Python 3.12.3): qwen-tts
-# resolves cleanly (no numpy/numba-style conflicts like deploy/stt needs).
-# Requires the `sox` system binary at runtime (apt install sox) — its
-# absence only produces a warning, not a hard failure, in the current
-# package version, but install it for full functionality.
-qwen-tts
+# faster-qwen3-tts (VEN-56): the same Qwen3-TTS CustomVoice checkpoint the
+# official qwen-tts package serves, wrapped with CUDA-graph decode and
+# genuine chunked streaming generation — the official package can only
+# synthesize a full utterance per blocking call (its "streaming" flag
+# simulates streaming text input, not generation). Requires torch>=2.5.1
+# (CUDA-graph capture is broken on <=2.5.0 per its README). The `sox`
+# system binary note from the qwen-tts era still applies (apt install sox).
+faster-qwen3-tts

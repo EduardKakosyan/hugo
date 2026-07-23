@@ -1,43 +1,46 @@
-"""Qwen3-TTS-backed implementation of the Synthesizer protocol.
+"""Qwen3-TTS-backed implementation of the Synthesizer protocol, via the
+faster-qwen3-tts wrapper (VEN-56).
 
 Only importable inside the `tts` service venv (see deploy/tts/requirements.txt
-and docs/adr/0005) — qwen_tts is deliberately not a dependency of the main
-hugo package.
+and docs/adr/0005) — faster_qwen3_tts is deliberately not a dependency of
+the main hugo package.
 
-NOT streaming at the model level: the official `qwen-tts` package's
-`non_streaming_mode` flag only simulates streaming *text input*, not
-streaming *generation* — confirmed via its own docstring on dgx1
-(2026-07-13). `generate_custom_voice()` always returns a complete
-utterance's audio in one call. We synthesize sentence-by-sentence (see
-split_sentences in servers/tts_server.py), chunking each sentence's audio
-ourselves and yielding progressively, so callers get a genuinely
-streamable, cancellable interface at the wire-protocol layer: first audio
-after one sentence's compute rather than the whole answer's (whole-answer
-was measured in minutes of silence on dgx1, 2026-07-22), and cancellation
-between sentences skips the unspoken sentences' GPU compute. Within a
-single sentence the model call is still all-or-nothing; swapping to a
-true streaming-capable fork (e.g. andimarafioti/faster-qwen3-tts) remains
-a documented future optimization, not needed for a correct v1.
+Same model, same voice, genuinely streaming: the official `qwen_tts`
+package can only synthesize a full utterance in one blocking call (its
+"streaming" flag simulates streaming *text input*, not generation —
+confirmed in its source), which put whole seconds of dead air before every
+sentence. faster-qwen3-tts wraps the identical CustomVoice checkpoint with
+CUDA-graph decode and yields audio chunks *during* generation — measured
+by its author on DGX Spark GB10: ~464ms to first audio at 1.66x realtime
+for the 1.7B. generate_custom_voice_streaming is a synchronous generator
+doing GPU work per step, so it runs on a worker thread bridged to asyncio
+through a queue; closing our async generator (the barge-in path) stops the
+thread at the next chunk boundary, skipping the unspoken audio's GPU
+compute.
 
-VERIFIED on real hardware (dgx1, 2026-07-13): model loads, speaker/language
-lists resolve, and a real synthesis call returns float32 PCM at 24kHz.
+The previous per-sentence chunking (split_sentences) is gone from this
+layer: utterances now arrive one sentence at a time from the streaming
+tool loop, and true streaming makes first-audio latency independent of
+text length anyway.
 """
 
 import asyncio
+import threading
 from collections.abc import AsyncGenerator
 
 import numpy as np
-import qwen_tts
 import torch
-
-from hugo.servers.tts_server import split_sentences
+from faster_qwen3_tts import FasterQwen3TTS
 
 MODEL_NAME = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
 DEFAULT_SPEAKER = "ryan"
-DEFAULT_LANGUAGE = "english"
+DEFAULT_LANGUAGE = "English"
 SAMPLE_RATE_HZ = 24_000
-CHUNK_DURATION_S = 0.05
-CHUNK_BYTES = int(SAMPLE_RATE_HZ * CHUNK_DURATION_S) * 2  # 16-bit samples
+# Decode steps per yielded chunk: 4 steps ≈ 333ms of audio at the model's
+# 12Hz frame rate — the author's chunk-size sweep shows smaller chunks cut
+# time-to-first-audio at a small throughput cost, the right trade for a
+# conversational assistant.
+CHUNK_DECODE_STEPS = 4
 
 
 class QwenTtsSynthesizer:
@@ -47,33 +50,50 @@ class QwenTtsSynthesizer:
         speaker: str = DEFAULT_SPEAKER,
         language: str = DEFAULT_LANGUAGE,
     ) -> None:
-        # device_map/dtype must be explicit: from_pretrained's default is
-        # CPU, where a single sentence takes minutes on dgx1's Grace cores
-        # (observed live 2026-07-22 — 221% CPU, 85s+ into one sentence,
-        # while every earlier "silent SPEAKING" incident traced back to
-        # exactly this). qwen_tts's own docstring names these kwargs as
-        # the intended GPU configuration.
-        self._model = qwen_tts.Qwen3TTSModel.from_pretrained(
-            model_name, device_map="cuda:0", dtype=torch.bfloat16
+        # device/dtype must be explicit — the CPU default cost minutes per
+        # sentence on dgx1's Grace cores (observed live 2026-07-22).
+        # kwargs match the author's own DGX Spark benchmark configuration.
+        self._model = FasterQwen3TTS.from_pretrained(
+            model_name,
+            device="cuda",
+            dtype=torch.bfloat16,
+            attn_implementation="eager",
+            max_seq_len=2048,
         )
         self._speaker = speaker
         self._language = language
 
     async def synthesize(self, text: str) -> AsyncGenerator[bytes, None]:
-        # Sentence-by-sentence, not whole-utterance: generate_custom_voice
-        # is one blocking call per text it's given, so per-sentence calls
-        # cap first-audio latency at one sentence and let cancellation
-        # (generator close between yields) skip the remaining sentences'
-        # GPU compute entirely — see split_sentences' docstring.
-        for sentence in split_sentences(text):
-            pcm = await asyncio.to_thread(self._synthesize_full, sentence)
-            for offset in range(0, len(pcm), CHUNK_BYTES):
-                yield pcm[offset : offset + CHUNK_BYTES]
+        loop = asyncio.get_running_loop()
+        chunks: asyncio.Queue[bytes | None] = asyncio.Queue()
+        stop = threading.Event()
 
-    def _synthesize_full(self, text: str) -> bytes:
-        [wav], _sample_rate = self._model.generate_custom_voice(
-            text=text, speaker=self._speaker, language=self._language
-        )
-        clipped = np.clip(wav, -1.0, 1.0)
-        pcm16 = (clipped * 32767).astype(np.int16)
-        return bytes(pcm16.tobytes())
+        def generate() -> None:
+            try:
+                for wav_chunk, _sample_rate, _timing in self._model.generate_custom_voice_streaming(
+                    text=text,
+                    speaker=self._speaker,
+                    language=self._language,
+                    chunk_size=CHUNK_DECODE_STEPS,
+                ):
+                    if stop.is_set():
+                        return
+                    loop.call_soon_threadsafe(chunks.put_nowait, _float32_to_pcm16(wav_chunk))
+            finally:
+                loop.call_soon_threadsafe(chunks.put_nowait, None)
+
+        generation = loop.run_in_executor(None, generate)
+        try:
+            while (chunk := await chunks.get()) is not None:
+                yield chunk
+        finally:
+            # Runs on normal exhaustion AND on aclose() (cancellation /
+            # barge-in): stop the GPU thread at its next chunk boundary and
+            # wait it out so a new utterance never overlaps generation.
+            stop.set()
+            await generation
+
+
+def _float32_to_pcm16(wav: np.ndarray) -> bytes:
+    clipped = np.clip(wav, -1.0, 1.0)
+    return bytes((clipped * 32767).astype(np.int16).tobytes())
