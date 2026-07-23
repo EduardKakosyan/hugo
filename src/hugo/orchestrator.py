@@ -8,12 +8,12 @@ VoiceLoop, and runs until SIGINT/SIGTERM. `hugo stop` (a separate process
 invocation) reads the pidfile and uses the group-kill safety net — see
 docs/adr/0002.
 
-NOT YET run for real end-to-end: doing so means loading the actual
-~60-70GB Nemotron-3 model on the *shared* dgx1 box, which needs explicit
-coordination (not a quick spike) — see the M1.11 notes in the plan.
-M1.9 already verified LlmClient/ToolLoop against a real (small) vLLM
-server; M1.5's ReachyMiniClient is grounded in the real SDK API but has no
-physically-connected robot to test against yet.
+Runs for real on dgx1 (first clean end-to-end voice turn 2026-07-22;
+conversational-latency stack verified live 2026-07-23 — see VEN-56 and
+tests/integration/). Startup is staged for the shared 121GB unified
+memory pool: STT+TTS concurrently, then vLLM with streamed weight
+loading and continuous page-cache eviction, with the robot daemon
+connecting alongside — ~4m45s to listening, measured.
 """
 
 import asyncio

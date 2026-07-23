@@ -5,8 +5,9 @@ work together. `echo`/`bargein` need the robot physically connected;
 running (e.g. `.venv-stt/bin/python -m hugo.servers.stt_server`) — these
 commands are deliberately narrow, not another orchestrator.
 
-NOT YET run against real hardware — no Reachy Mini was connected to dgx1
-while this was written. See robot/reachy_client.py's own caveat.
+Verified against the physically-connected robot on dgx1 (echo round trip
+2026-07-13, and every incident diagnosis since — see
+robot/reachy_client.py's history notes).
 """
 
 import asyncio

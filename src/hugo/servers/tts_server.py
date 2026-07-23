@@ -26,7 +26,6 @@ import asyncio
 import contextlib
 import json
 import logging
-import re
 from collections.abc import AsyncGenerator, Callable
 from typing import Protocol
 
@@ -37,23 +36,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8002
-
-
-_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?;:])\s+")
-
-
-def split_sentences(text: str) -> list[str]:
-    """Splits text at sentence-ish boundaries for incremental synthesis.
-
-    Qwen3-TTS can only synthesize a full utterance in one blocking call
-    (see qwen_tts_synthesizer.py), so first-audio latency scales with the
-    length of the text handed to it. Synthesizing sentence-by-sentence
-    caps that latency at one sentence — measured live on dgx1 2026-07-22,
-    a full multi-sentence answer took minutes before its first sample,
-    which reads as HUGO simply not responding. Unpunctuated text passes
-    through whole; no worse than before.
-    """
-    return [s for s in (p.strip() for p in _SENTENCE_BOUNDARY.split(text)) if s]
 
 
 class Synthesizer(Protocol):
