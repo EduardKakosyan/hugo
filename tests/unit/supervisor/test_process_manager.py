@@ -116,6 +116,37 @@ async def test_start_all_waits_for_health_check_to_pass(
     assert attempts == 3
 
 
+async def test_after_healthy_runs_between_this_spec_and_the_next(
+    tmp_path: Path, fake_processes: list[FakeProcess]
+) -> None:
+    order: list[str] = []
+
+    async def healthy() -> bool:
+        order.append("health")
+        return True
+
+    async def after_healthy() -> None:
+        order.append("after_healthy")
+
+    async def second_health() -> bool:
+        order.append("second-spec-health")
+        return True
+
+    manager = ProcessManager(pidfile=Pidfile(tmp_path / "hugo.pid"))
+    await manager.start_all(
+        [
+            ManagedProcessSpec(
+                name="a", command=["true"], health_check=healthy, after_healthy=after_healthy
+            ),
+            ManagedProcessSpec(name="b", command=["true"], health_check=second_health),
+        ]
+    )
+
+    # The hook (page-cache eviction in production) must complete before the
+    # next spec starts loading its model — that ordering IS the fix.
+    assert order == ["health", "after_healthy", "second-spec-health"]
+
+
 async def test_failed_health_check_tears_down_already_started_processes(
     tmp_path: Path, fake_processes: list[FakeProcess]
 ) -> None:

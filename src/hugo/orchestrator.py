@@ -32,6 +32,7 @@ from hugo.agent.web_search import WebSearchTool
 from hugo.config import Config
 from hugo.memory.store import MemoryStore
 from hugo.robot.reachy_client import ReachyMiniClient
+from hugo.supervisor.page_cache import evict_directory_from_page_cache, hf_model_cache_dir
 from hugo.supervisor.pidfile import Pidfile
 from hugo.supervisor.process_manager import ManagedProcessSpec, ProcessManager
 from hugo.voice.loop import VoiceLoop
@@ -73,6 +74,18 @@ def _websocket_health_check(url: str) -> HealthCheck:
 
 def _build_specs(config: Config) -> list[ManagedProcessSpec]:
     llm_port = urlsplit(config.llm_base_url).port
+
+    async def evict_llm_checkpoint_from_page_cache() -> None:
+        # Unified memory: vLLM's 74.8GB checkpoint read fills the page
+        # cache, and the next spec's CUDA model load OOMs rather than
+        # forcing reclaim — STT failed with a real CUDA OOM against 25GB
+        # of buff/cache, reproduced 2026-07-22 and 2026-07-23. Evict the
+        # checkpoint the moment vLLM is healthy (the weights are on the
+        # GPU now; the cached file pages are dead weight).
+        checkpoint_dir = hf_model_cache_dir(config.llm_model)
+        evicted = await asyncio.to_thread(evict_directory_from_page_cache, checkpoint_dir)
+        logger.info("evicted %.1f GiB of %s from the page cache", evicted / 2**30, checkpoint_dir)
+
     return [
         ManagedProcessSpec(
             name="vllm",
@@ -168,6 +181,7 @@ def _build_specs(config: Config) -> list[ManagedProcessSpec]:
             # recipe for this model (pairs with the MTP speculative
             # config above for the published ~23 tok/s decode).
             extra_env={"MAX_JOBS": "4", "VLLM_NVFP4_GEMM_BACKEND": "marlin"},
+            after_healthy=evict_llm_checkpoint_from_page_cache,
         ),
         ManagedProcessSpec(
             name="stt",

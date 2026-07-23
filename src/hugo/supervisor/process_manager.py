@@ -34,6 +34,10 @@ class ManagedProcessSpec:
     # JIT kernel compilation, which otherwise defaults to nproc parallel
     # nvcc jobs and can OOM the system while a large model is also loading.
     extra_env: dict[str, str] | None = None
+    # Runs after this process passes its health check, before the next spec
+    # starts — e.g. evicting vLLM's checkpoint from the page cache so the
+    # STT model's CUDA load doesn't OOM (see supervisor/page_cache.py).
+    after_healthy: Callable[[], Awaitable[None]] | None = None
 
 
 class HealthCheckFailed(RuntimeError):
@@ -70,6 +74,8 @@ class ProcessManager:
                 self._processes.append((spec.name, proc))
                 if spec.health_check is not None and not await self._wait_healthy(spec, proc):
                     raise HealthCheckFailed(spec.name)
+                if spec.after_healthy is not None:
+                    await spec.after_healthy()
         except Exception:
             await self.stop_all()
             raise
