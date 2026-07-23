@@ -10,18 +10,21 @@ robot mic and listens. Footprint is deliberately tiny — the wake-word
 model on CPU, no GPU, no model servers — so the 121GB pool stays free
 while HUGO sleeps (ADR 0002's spirit holds).
 
-On detection it plays the wake chime (the audible "heard you — waking
-up"; the full model load takes minutes; the voice loop speaks "I'm
-awake." when it's actually ready), releases the robot's single-owner
-media pipeline, and asks systemd to start hugo. If hugo starts by other
-means (CLI, another terminal), the poll notices and the mic is released
-just the same.
+On detection it plays the wake chime and stands the robot up (the
+audible and physical "heard you — waking up"; the full model load takes
+minutes; the voice loop speaks "I'm awake." when it's actually ready),
+releases the robot's single-owner media pipeline, and asks systemd to
+start hugo. If hugo starts by other means (CLI, another terminal), the
+poll notices and the mic is released just the same. Chime-only was the
+original behavior, and a robot that answers "hey jarvis" without moving
+reads as not having heard at all (live user report, 2026-07-23).
 """
 
 import asyncio
 import contextlib
 import logging
 import subprocess
+from collections.abc import Awaitable, Callable
 
 from hugo.config import Config, load_config
 from hugo.logging_setup import configure_logging
@@ -37,8 +40,14 @@ _CHIME_DRAIN_S = 0.6
 _POLL_INTERVAL_S = 5.0
 
 
-async def listen_until_wake(robot: RobotAudioIO, wake_word: WakeWordListener) -> None:
-    """Consumes mic frames until the wake word fires, then chimes."""
+async def listen_until_wake(
+    robot: RobotAudioIO,
+    wake_word: WakeWordListener,
+    on_wake: Callable[[], Awaitable[None]] | None = None,
+) -> None:
+    """Consumes mic frames until the wake word fires, then chimes and
+    fires `on_wake` (the motor stand-up). Both acknowledgments complete
+    before this returns, so the caller can safely release media after."""
     wake_word.reset()
     frame_count = 0
     peak_score = 0.0
@@ -59,8 +68,14 @@ async def listen_until_wake(robot: RobotAudioIO, wake_word: WakeWordListener) ->
             peak_score = 0.0
         if fired:
             logger.info("wake word heard while asleep")
+            # Motor commands ride the daemon's control channel, separate
+            # from the media pipeline this process holds — so the stand-up
+            # can start immediately and overlap the chime drain.
+            wake_task = None if on_wake is None else asyncio.ensure_future(on_wake())
             await robot.play_audio(wake_chime_pcm16(robot.output_sample_rate_hz))
             await asyncio.sleep(_CHIME_DRAIN_S)
+            if wake_task is not None:
+                await wake_task
             return
 
 
@@ -98,9 +113,22 @@ async def _listen_while_hugo_down(config: Config) -> bool:
 
     robot = ReachyMiniClient(playback_gain=config.playback_gain)
     wake_word = WakeWordDetector(model_name=config.wake_word)
+
+    async def stand_up_best_effort() -> None:
+        # The SDK's wake_up() also plays its own "Toudoum" through the
+        # media pipeline, so it must run before robot.close() releases it.
+        # Best-effort: a motor or sound fault must never stop hugo from
+        # being started.
+        try:
+            await robot.wake_up()
+        except Exception:
+            logger.exception("motor wake-up failed; waking hugo anyway")
+
     await robot.start_recording()
     await robot.start_playing()
-    listen_task = asyncio.ensure_future(listen_until_wake(robot, wake_word))
+    listen_task = asyncio.ensure_future(
+        listen_until_wake(robot, wake_word, on_wake=stand_up_best_effort)
+    )
     hugo_up_task = asyncio.ensure_future(_wait_until_hugo_up())
     try:
         logger.info("asleep and listening — say '%s' to wake hugo", config.wake_word)

@@ -31,6 +31,26 @@ async def test_listener_ignores_noise_until_the_wake_word_then_chimes() -> None:
     assert wake_word.reset_count == 1
 
 
+async def test_listener_stands_the_robot_up_when_the_wake_word_fires() -> None:
+    robot = FakeRobotAudioIO()
+    wake_word = FakeWakeWordListener()
+    stand_ups = 0
+
+    async def on_wake() -> None:
+        nonlocal stand_ups
+        stand_ups += 1
+
+    robot.push_frame(b"just-noise")
+    robot.push_frame(WAKE_MARKER)
+
+    await asyncio.wait_for(listen_until_wake(robot, wake_word, on_wake=on_wake), timeout=2.0)
+
+    # The physical ack lands with the chime — both must have completed by
+    # the time the listener returns (the caller releases media right after).
+    assert stand_ups == 1
+    assert robot.played_chunks == [wake_chime_pcm16(robot.output_sample_rate_hz)]
+
+
 async def test_startup_announcement_is_spoken_before_listening_begins() -> None:
     robot = FakeRobotAudioIO()
     tts = FakeTtsSession()
