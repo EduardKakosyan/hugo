@@ -142,6 +142,7 @@ class VoiceLoop:
         stop_phrases: Sequence[str] = STOP_PHRASES,
         sleep_phrases: Sequence[str] = SLEEP_PHRASES,
         on_sleep: Callable[[], None] | None = None,
+        startup_announcement: str | None = None,
     ) -> None:
         self._robot = robot
         self._wake_word = wake_word
@@ -160,6 +161,7 @@ class VoiceLoop:
         self._stop_phrases = frozenset(normalize_command(p) for p in stop_phrases)
         self._sleep_phrases = frozenset(normalize_command(p) for p in sleep_phrases)
         self._on_sleep = on_sleep
+        self._startup_announcement = startup_announcement
 
         self.state: State = "IDLE"
         self._pending_transcript: str = ""
@@ -181,6 +183,17 @@ class VoiceLoop:
         await self._robot.start_playing()
         broadcaster = FrameBroadcaster(self._robot.read_mic_frames())
         broadcaster.start()
+        # Spoken once at startup so the user knows the minutes-long model
+        # load is over and the wake word works — matters most on the
+        # wake-from-sleep path, where "hey jarvis" chimed minutes ago
+        # (see wake_listener.py). Best-effort: a TTS hiccup here must not
+        # stop the loop from starting.
+        if self._startup_announcement:
+            try:
+                await self._speak(self._startup_announcement)
+                await self._wait_for_playback_tail()
+            except Exception:
+                logger.exception("startup announcement failed; continuing")
         try:
             while not self._sleep_requested:
                 try:
@@ -215,16 +228,23 @@ class VoiceLoop:
             self.state = "LISTENING"
 
     async def _route_transcript(self, transcript: str | None) -> None:
+        # Transcripts are logged deliberately (single-user desk robot):
+        # the first live session's misbehavior was undiagnosable because
+        # nothing recorded what STT actually heard (VEN-56, 2026-07-23).
         if transcript is None or not transcript.strip():
+            logger.info("heard nothing usable (%r), ending conversation", transcript)
             await self._end_conversation()
             return
         command = normalize_command(transcript)
         if command in self._sleep_phrases:
+            logger.info("heard sleep phrase: %r", transcript)
             await self._run_sleep()
             return
         if command in self._stop_phrases:
+            logger.info("heard stop phrase: %r", transcript)
             await self._end_conversation()
             return
+        logger.info("heard: %r", transcript)
         self._pending_transcript = transcript
         self.state = "RESPONDING"
 
@@ -440,9 +460,21 @@ class VoiceLoop:
                     now - self._end_of_speech_at,
                 )
 
+    # Fixed cushion past the estimated playback end: the estimate can't
+    # see the robot's own output buffering, and the first live session's
+    # follow-up window opened onto the tail of HUGO's own reply — it got
+    # transcribed and silently ended the conversation (VEN-56, 2026-07-23).
+    _PLAYBACK_TAIL_GUARD_S = 0.5
+
     async def _wait_for_playback_tail(self) -> None:
         # play_audio only queues; wait out the estimated real playback so
         # the follow-up window doesn't open onto HUGO's own voice (no AEC).
-        remaining = self._playback_deadline - asyncio.get_running_loop().time()
+        if self._playback_deadline <= 0:
+            return
+        remaining = (
+            self._playback_deadline
+            + self._PLAYBACK_TAIL_GUARD_S
+            - asyncio.get_running_loop().time()
+        )
         if remaining > 0:
             await asyncio.sleep(remaining)

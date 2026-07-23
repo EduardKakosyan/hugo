@@ -329,6 +329,10 @@ async def run(config: Config) -> None:
             # Spoken "go to sleep" and `hugo sleep`'s SIGTERM converge on
             # the same graceful shutdown below (CONTEXT.md: Sleep).
             on_sleep=stop_event.set,
+            # The audible "load is done, wake word works now" — the wake
+            # chime from the sleeping ear fired minutes earlier (see
+            # wake_listener.py).
+            startup_announcement="I'm awake.",
         )
 
         running_loop = asyncio.get_running_loop()

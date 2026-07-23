@@ -11,6 +11,9 @@
 
 [Unit]
 Description=HUGO voice assistant (model servers + voice loop)
+# The sleeping-ear listener and the full stack are mutually exclusive —
+# the robot's media pipeline is single-owner (see hugo-wake.service).
+Conflicts=hugo-wake.service
 
 [Service]
 Type=simple
@@ -28,6 +31,9 @@ Restart=no
 # EngineCore safety net), which takes hugo itself with it by design —
 # that's a successful stop, not a crash.
 SuccessExitStatus=SIGKILL
+# After every sleep, stop, or crash: put the ear back on so "hey jarvis"
+# can wake HUGO from a full sleep.
+ExecStopPost=/usr/bin/systemctl --user start --no-block hugo-wake.service
 
 [Install]
 WantedBy=default.target

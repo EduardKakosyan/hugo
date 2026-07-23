@@ -108,6 +108,16 @@ def stop() -> None:
     typer.echo("hugo stopped")
 
 
+@app.command("wake-listener")
+def wake_listener() -> None:
+    """Minimal always-on ear while HUGO sleeps: waits for the wake word,
+    chimes, and starts the hugo systemd service. Run by
+    hugo-wake.service, not usually by hand."""
+    from hugo import wake_listener as listener  # deferred: robot import chain
+
+    listener.main()
+
+
 @app.command()
 def forget(yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation.")) -> None:
     """Delete HUGO's persistent facts. Deliberate and explicit — sleep
