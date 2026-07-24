@@ -12,6 +12,11 @@ Description=HUGO wake-word listener (starts hugo on wake word while asleep)
 Type=simple
 WorkingDirectory=%h/hugo
 EnvironmentFile=%h/.hugo_secrets
+# The reachy_mini SDK auto-spawns `reachy-mini-daemon` via PATH lookup
+# when no daemon answers. Under systemd the venv bin is not on PATH, so
+# a dead daemon meant FileNotFoundError + a crash-looping service
+# (live 2026-07-24, the first time the daemon ever died under systemd).
+Environment=PATH=%h/hugo/.venv/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=%h/hugo/.venv/bin/hugo wake-listener
 Restart=always
 RestartSec=5

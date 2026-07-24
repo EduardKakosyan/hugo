@@ -18,6 +18,11 @@ WorkingDirectory=%h/hugo
 # Plain KEY=VALUE lines (no `export` — systemd doesn't parse it):
 # HUGO_TAVILY_API_KEY, HUGO_PLAYBACK_GAIN, and any other HUGO_* overrides.
 EnvironmentFile=%h/.hugo_secrets
+# The reachy_mini SDK auto-spawns `reachy-mini-daemon` via PATH lookup
+# when no daemon answers. Under systemd the venv bin is not on PATH, so
+# a dead daemon meant FileNotFoundError + a crash-looping service
+# (live 2026-07-24, the first time the daemon ever died under systemd).
+Environment=PATH=%h/hugo/.venv/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=%h/hugo/.venv/bin/hugo start
 # SIGTERM is hugo's graceful sleep path (CONTEXT.md: Sleep). Model
 # teardown takes tens of seconds; give it room before systemd escalates.
