@@ -47,13 +47,15 @@ logger = logging.getLogger(__name__)
 _CHIME_DRAIN_S = 0.6
 _POLL_INTERVAL_S = 5.0
 
-# Lower than the in-session 0.5: even with the ear-open rest posture
-# (SLEEP_EAR_OPEN_HEAD — the SDK's full fold buried the mics and scores
-# collapsed to ~0.02, live 2026-07-23), the slumped head hears somewhat
-# worse than the upright one. The asleep ambient noise floor measured
-# 0.000-0.04, so 0.35 keeps a wide margin against false wakes — and a
-# false wake only costs a model load and an "I'm awake".
-_ASLEEP_WAKE_THRESHOLD = 0.35
+# Far lower than the in-session 0.5: the robot sleeps in the SDK's full
+# fold with the mics buried (the eased ear-open pose was removed on user
+# request, 2026-07-28 — an earlier full-fold measurement saw scores
+# collapse to ~0.02 for real speech), and compensates with max mic
+# capture gain (ASLEEP_MIC_CAPTURE_PCT) plus this low bar. The asleep
+# ambient noise floor measured 0.000-0.04 at the same 100% gain, so 0.15
+# still clears it — and a false wake only costs a model load and an
+# "I'm awake".
+_ASLEEP_WAKE_THRESHOLD = 0.15
 
 
 # Pre-rendered "On my way. Give me a few minutes to warm up." in HUGO's
@@ -162,10 +164,13 @@ async def _wait_until_hugo_up() -> None:
 async def _listen_while_hugo_down(config: Config) -> bool:
     """Holds the mic until the wake word fires (True) or hugo comes up by
     other means (False). Releases the media pipeline either way."""
-    from hugo.robot.reachy_client import ReachyMiniClient
+    from hugo.robot.reachy_client import ASLEEP_MIC_CAPTURE_PCT, ReachyMiniClient
     from hugo.voice.wake_word import WakeWordDetector
 
-    robot = ReachyMiniClient(playback_gain=config.playback_gain)
+    robot = ReachyMiniClient(
+        playback_gain=config.playback_gain,
+        mic_capture_gain_pct=ASLEEP_MIC_CAPTURE_PCT,
+    )
     wake_word = WakeWordDetector(model_name=config.wake_word, threshold=_ASLEEP_WAKE_THRESHOLD)
     await robot.start_recording()
     await robot.start_playing()

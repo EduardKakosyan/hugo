@@ -103,13 +103,51 @@ def _set_speaker_hardware_volume_to_max() -> None:
             )
 
 
+# Mic capture gain, as a percentage of the ALSA range. Two operating
+# points, chosen per-connection by whoever owns the media session:
+# - Awake (default): headroom so HUGO's own speech doesn't clip the mic.
+#   At 100% the capture path hard-clipped (0 dBFS) whenever the robot
+#   spoke and barge-in wake scores pinned at 0.001; at 65% (-21dB) a
+#   barge-in "hey hugo" over playback scored 0.27 (live 2026-07-28).
+# - Asleep (wake listener): max sensitivity — the robot sleeps in the
+#   SDK's full fold with the mics buried, and the sleeping ear compensates
+#   with gain instead of posture (the eased ear-open pose was removed on
+#   user request, 2026-07-28).
+AWAKE_MIC_CAPTURE_PCT = 65
+ASLEEP_MIC_CAPTURE_PCT = 100
+
+
+def _set_mic_capture_gain(percent: int) -> None:
+    """Same contract as the speaker pin above: ALSA state doesn't survive
+    reboot/replug, so set on every connect; best-effort — a missing amixer
+    or renamed control must never block the voice stack."""
+    for control in ("Headset,0", "Headset,1"):
+        result = subprocess.run(
+            ["amixer", "-D", f"hw:{SPEAKER_ALSA_CARD}", "sset", control, f"{percent}%"],
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "could not set robot mic capture gain (%s): %s",
+                control,
+                result.stderr.decode(errors="replace").strip(),
+            )
+
+
 class ReachyMiniClient:
-    def __init__(self, use_sim: bool = False, playback_gain: float = 1.0) -> None:
+    def __init__(
+        self,
+        use_sim: bool = False,
+        playback_gain: float = 1.0,
+        mic_capture_gain_pct: int = AWAKE_MIC_CAPTURE_PCT,
+    ) -> None:
         from reachy_mini import ReachyMini
 
         self._robot = self._connect_with_retries(ReachyMini, use_sim)
         self._media = self._robot.media
         _set_speaker_hardware_volume_to_max()
+        _set_mic_capture_gain(mic_capture_gain_pct)
         # Software gain on all speaker output: the media backend exposes no
         # volume control at all (confirmed by inspecting MediaManager on
         # dgx1, 2026-07-23) — but the DAC's ALSA hardware mixer does, see
