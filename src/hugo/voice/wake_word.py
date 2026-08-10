@@ -3,11 +3,11 @@
 on Linux, which has no Python 3.12 wheels, but the ONNX backend doesn't need
 it at all — confirmed on dgx1, 2026-07-13).
 
-No pretrained "Hey HUGO" model exists yet — custom wake words need training
-(openWakeWord ships a training pipeline for this). Defaults to a stock
-pretrained phrase (see DEFAULT_MODEL) as a placeholder; training a real
-"Hey HUGO" model is a follow-up, not a v1 blocker. Config.wake_word already
-makes this swappable.
+No pretrained "Hey HUGO" model exists, so one was trained (VEN-58):
+`voice/assets/hey_hugo.onnx`, selected by pointing Config.wake_word at that
+path. DEFAULT_MODEL stays a stock phrase so a bare checkout and the unit
+tests need no asset, and so rolling back to hey_jarvis is a one-line change
+to HUGO_WAKE_WORD.
 """
 
 from pathlib import Path
@@ -25,15 +25,19 @@ class WakeWordDetector:
         self, model_name: str = DEFAULT_MODEL, threshold: float = DEFAULT_THRESHOLD
     ) -> None:
         is_custom_model_file = model_name.endswith(".onnx")
-        if not is_custom_model_file:
-            # Model() doesn't auto-download its pretrained weights —
-            # confirmed by a fresh-clone failure on dgx1 (2026-07-13).
-            # Ensure they're present rather than requiring a separate
-            # manual step first. A custom model (a path to an .onnx, e.g.
-            # a trained hey_hugo) skips this: only the shared preprocessor
-            # models are needed and they're already on disk from the
-            # stock-model era.
-            openwakeword.utils.download_models([model_name])
+        # Model() doesn't auto-download anything it needs — confirmed by a
+        # fresh-clone failure on dgx1 (2026-07-13). Ensure it rather than
+        # requiring a separate manual step first. Called unconditionally
+        # because every model, custom or stock, runs on the same shared
+        # preprocessors (melspectrogram + embedding), and download_models()
+        # fetches those whatever list it's handed. The earlier version
+        # skipped this entirely for a custom .onnx on the grounds that the
+        # preprocessors were "already on disk from the stock-model era" --
+        # true only of a venv that had once run a stock model. A worktree's
+        # fresh venv on dgx1 (2026-08-10) shipped melspectrogram.tflite but
+        # no .onnx, and startup died in ort.InferenceSession with
+        # NO_SUCHFILE on melspectrogram.onnx.
+        openwakeword.utils.download_models([] if is_custom_model_file else [model_name])
         self._model = Model(wakeword_models=[model_name], inference_framework="onnx")
         # openWakeWord keys its score dict by the file stem for custom
         # model paths, and by the plain name for stock models.
