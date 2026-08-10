@@ -16,6 +16,32 @@ unified memory, aarch64/CUDA). Domain glossary: `CONTEXT.md`. Decisions:
   EnvironmentFile format — no `export`). Holds `HUGO_TAVILY_API_KEY`,
   `HUGO_PLAYBACK_GAIN`.
 
+## Branch worktrees across both machines
+
+Riptide creates Mac worktrees under `~/.humanlayer/workspaces/<slug>/HUGO`
+(`.humanlayer/workspace.json`). `scripts/dgx_worktree.sh` mirrors the same
+branch to `~/hugo-worktrees/<slug>` on dgx1 so it can actually run:
+
+    scripts/dgx_worktree.sh sync    # push branch + create/update the dgx1 worktree
+    scripts/dgx_worktree.sh use     # repoint hugo.service at it (hugo must be stopped)
+    scripts/dgx_worktree.sh status  # active checkout, unit states, free -g
+    scripts/dgx_worktree.sh reset   # back to the deployed ~/hugo
+
+- **Exactly one checkout runs at a time** — one robot, one 121GB pool, and a
+  shared `state_dir` (`~/.local/state/hugo`) whose pidfile is the existing
+  cross-checkout mutual exclusion. `use` writes a systemd drop-in over
+  `hugo.service` rather than adding a second unit, because `wake_listener.py`
+  gates on the literal unit name `hugo.service`: a worktree under any other
+  name leaves the listener holding the mic beside the voice loop, which the
+  reachy daemon answers by silently splitting frames (the 2026-07-23 bug).
+- The worktree gets its own `.venv` but **borrows** `.venv-vllm`/`-stt`/`-tts`
+  via `HUGO_REPO_DIR=~/hugo`, with `PYTHONPATH=<worktree>/src` in front of
+  their editable installs (plain `.pth` path entries, so PYTHONPATH wins;
+  `process_manager` passes the environment to the servers). A branch that
+  changes `deploy/*/requirements.txt` therefore needs its own service venv —
+  `sync` warns when it sees that.
+- Only pushed commits reach dgx1. Re-run `sync` after each push.
+
 ## Running HUGO on dgx1
 
 Preferred: the systemd user service (`scripts/install_systemd_service.sh`):

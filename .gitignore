@@ -12,6 +12,8 @@ htmlcov/
 .coverage
 venv/
 .venv/
+# Per-service venvs (ADR 0005): .venv-vllm, .venv-stt, .venv-tts
+.venv-*/
 
 # Local env files
 .env
