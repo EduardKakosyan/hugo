@@ -54,3 +54,6 @@ dist/
 # Knowledge store (may contain sensitive data)
 knowledge/*.db
 knowledge/*.index
+
+# Riptide workspace local overrides
+.humanlayer/workspace.local.json

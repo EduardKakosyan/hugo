@@ -1,0 +1,19 @@
+{
+  "disabled": false,
+  "pathTemplate": "~/.humanlayer/workspaces/{{ TASKSLUG }}/{{ REPOBASENAME }}",
+  "branchTemplate": "{{ TASKSLUG }}",
+  "sourceRef": "HEAD",
+  "setupCommand": "uv sync",
+  "copyGlobs": [
+    ".claude/settings.local.json",
+    ".secrets",
+    ".humanlayer/workspace.local.json"
+  ],
+  "repos": [
+    {
+      "localPath": ".",
+      "description": "HUGO voice-first embodied assistant (orchestrator, voice loop, robot)",
+      "primary": true
+    }
+  ]
+}
