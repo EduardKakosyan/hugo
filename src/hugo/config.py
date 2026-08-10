@@ -65,6 +65,16 @@ class Config(BaseSettings):
     # lines.
     interrupt_wake_score: float = 0.35
 
+    # Zone the spoken date and time are rendered in (get_current_time). An
+    # explicit IANA name rather than the host's zone: dgx1 is a shared box
+    # sitting on Etc/UTC, and `timedatectl set-timezone` there would move
+    # the clock for every teammate's session and service, so the robot
+    # carries its own location instead. Read live on 2026-08-10 as HUGO
+    # answering "11:36 PM, UTC" at 8:36 PM in Halifax -- a confidently
+    # wrong answer, which is worse than the "no idea what time it is" the
+    # tool replaced.
+    timezone: str = "America/Halifax"
+
     stop_phrases: list[str] = [
         "stop",
         "that's all",

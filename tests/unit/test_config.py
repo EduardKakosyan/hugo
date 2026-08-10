@@ -36,6 +36,21 @@ def test_acknowledge_after_s_loads_from_env(monkeypatch) -> None:
     assert load_config().acknowledge_after_s == 0.4
 
 
+def test_timezone_defaults_to_the_robots_location_not_the_hosts() -> None:
+    """dgx1 is a shared box on Etc/UTC; the robot carries its own zone so the
+    spoken time doesn't depend on a machine setting nobody owns."""
+    config = Config()
+
+    assert config.timezone == "America/Halifax"
+
+
+def test_timezone_loads_from_env(monkeypatch) -> None:
+    """The robot may move; the box it runs on may not be ours."""
+    monkeypatch.setenv("HUGO_TIMEZONE", "Europe/Lisbon")
+
+    assert load_config().timezone == "Europe/Lisbon"
+
+
 def test_tavily_api_key_defaults_to_none() -> None:
     assert Config().tavily_api_key is None
 

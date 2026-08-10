@@ -124,7 +124,7 @@ def build_tools(config: Config) -> list[Tool]:
     from hugo.agent.tools.current_time import CurrentTimeTool
     from hugo.agent.tools.web_search import WebSearchTool
 
-    tools: list[Tool] = [CurrentTimeTool()]
+    tools: list[Tool] = [CurrentTimeTool(config.timezone)]
     if config.tavily_api_key:
         tools.append(WebSearchTool(config.tavily_api_key))
     else:

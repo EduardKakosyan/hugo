@@ -5,17 +5,22 @@ The model has no idea what day it is: without this, "this afternoon",
 implied, which is why this trivial-looking tool is a hard prerequisite for
 every calendar-shaped question rather than filler.
 
-It reads the *host's* zone (`astimezone()` with no argument), which makes
-dgx1's timezone a deployment dependency of a user-visible answer for the
-first time — worth confirming with `timedatectl` on the box rather than
-discovering through a wrong "this afternoon".
+The zone comes from Config.timezone, not the host. Reading the host's zone
+was tried first and shipped a wrong answer within the hour: dgx1 runs on
+Etc/UTC, so HUGO announced "11:36 PM, UTC" at 8:36 PM in Halifax (live,
+2026-08-10). Fixing that at the host would mean moving the clock for every
+other user of a shared box, so the robot carries its own location — which
+also makes the rendering testable without touching the machine's clock.
 
 No arguments (one robot, one place) and no failure path: there is nothing
-here to time out, reject, or misread, so nothing to classify.
+here to time out, reject, or misread, so nothing to classify. A bad zone
+name is a startup error, not a tool failure — it would be wrong to let HUGO
+apologise mid-sentence for a typo in the config.
 """
 
 from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel
 
@@ -40,8 +45,14 @@ class CurrentTimeTool:
         CurrentTimeArgs,
     )
 
+    def __init__(self, timezone: str) -> None:
+        # Resolved once, at construction: an unknown zone name raises here,
+        # during startup, rather than inside a turn.
+        self._zone = ZoneInfo(timezone)
+
     async def invoke(self, arguments: dict[str, Any]) -> str:
         # Spelled out the way a person says it, because the model is about
-        # to say it: no ISO strings, no zero padding, no UTC offsets.
-        now = datetime.now().astimezone()
-        return now.strftime("%A, %-d %B %Y, %-I:%M %p, ") + str(now.tzinfo)
+        # to say it: no ISO strings, no zero padding, no UTC offsets. %Z
+        # renders the zone's current abbreviation, so it follows the zone
+        # into and out of daylight saving on its own (ADT / AST).
+        return datetime.now(self._zone).strftime("%A, %-d %B %Y, %-I:%M %p, %Z")

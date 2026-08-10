@@ -86,7 +86,19 @@ State = Literal["IDLE", "LISTENING", "RESPONDING"]
 # Matched against the normalized whole transcript — "stop the timer" is a
 # request, "stop" is a command.
 STOP_PHRASES = ("stop", "that's all", "thats all", "that is all", "never mind", "nevermind")
-SLEEP_PHRASES = ("go to sleep",)
+SLEEP_PHRASES = ("go to sleep", "goodnight", "good night")
+# Sleep also matches by its LAST word, unlike every other command here.
+# It is the one command whose failure the user doesn't stay to notice —
+# they say it and walk away — and the -21dB awake mic mangles leading
+# words far more than trailing ones: live on 2026-08-10, "go to sleep"
+# came back from STT as 'your sleep' and then "don't you sleep", neither
+# matched, and HUGO answered conversationally and stayed awake all night
+# holding 113GB. The word cap keeps "did you sleep well last night" out.
+# The accepted cost is that a genuine short "don't you sleep?" question
+# sleeps HUGO instead of answering it, which one wake word undoes —
+# whereas the failure it replaces costs a teammate the whole box.
+SLEEP_SUFFIX = "sleep"
+MAX_SLEEP_COMMAND_WORDS = 4
 # Sets expectations for the wake-from-sleep arc while the voice is still
 # loaded to say it: waking is chime -> minutes of silent model loading ->
 # stand up + "I'm awake". Without this warning, the silent window reads
@@ -271,7 +283,7 @@ class VoiceLoop:
             await self._end_conversation()
             return
         command = normalize_command(transcript)
-        if command in self._sleep_phrases:
+        if self._is_sleep_command(command):
             logger.info("heard sleep phrase: %r", transcript)
             await self._run_sleep()
             return
@@ -282,6 +294,12 @@ class VoiceLoop:
         logger.info("heard: %r", transcript)
         self._pending_transcript = transcript
         self.state = "RESPONDING"
+
+    def _is_sleep_command(self, command: str) -> bool:
+        if command in self._sleep_phrases:
+            return True
+        words = command.split()
+        return bool(words) and words[-1] == SLEEP_SUFFIX and len(words) <= MAX_SLEEP_COMMAND_WORDS
 
     async def _end_conversation(self) -> None:
         self._cue("conversation_end")
@@ -492,6 +510,12 @@ class VoiceLoop:
         return interrupted
 
     async def _speak(self, text: str) -> None:
+        # Log what is about to be said, not just what was heard. Chasing a
+        # report of "it said a bunch of gibberish" on 2026-08-10 was
+        # impossible from journald: the transcript was there, the reply was
+        # not, so there was no way to tell a bad answer from bad audio
+        # without re-running the turn by hand against the model.
+        logger.info("saying: %r", text)
         resampler = StreamingPcm16Resampler(
             self._tts_sample_rate_hz, self._robot.output_sample_rate_hz
         )

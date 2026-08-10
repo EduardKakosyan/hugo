@@ -4,8 +4,13 @@ and that the answer is written to be spoken rather than parsed."""
 
 import re
 from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import pytest
 
 from hugo.agent.tools.current_time import CurrentTimeTool
+
+_ZONE = "America/Halifax"
 
 
 def test_schema_is_a_flat_object_with_no_parameters() -> None:
@@ -19,21 +24,37 @@ def test_schema_is_a_flat_object_with_no_parameters() -> None:
 
 
 async def test_answer_names_the_weekday_date_and_zone() -> None:
-    now = datetime.now().astimezone()
+    now = datetime.now(ZoneInfo(_ZONE))
 
-    answer = await CurrentTimeTool().invoke({})
+    answer = await CurrentTimeTool(_ZONE).invoke({})
 
     # Spoken register: the weekday and month by name, no zero padding, no
-    # ISO string, and the zone the host is actually in (the answer is only
-    # as right as dgx1's clock -- see the module docstring).
+    # ISO string.
     assert now.strftime("%A") in answer
     assert now.strftime("%B") in answer
     assert str(now.day) in answer
     assert str(now.year) in answer
-    assert answer.endswith(str(now.tzinfo))
     assert not re.search(r"\d{4}-\d{2}-\d{2}", answer)
+
+
+async def test_answer_is_in_the_configured_zone_not_the_hosts() -> None:
+    """The bug this tool shipped with: dgx1 sits on Etc/UTC, so reading the
+    host zone had HUGO announcing 11:36 PM at 8:36 PM in Halifax. Two zones
+    far enough apart that the rendered hour cannot coincide."""
+    answer = await CurrentTimeTool("Pacific/Kiritimati").invoke({})
+
+    expected = datetime.now(ZoneInfo("Pacific/Kiritimati"))
+    assert expected.strftime("%-I:%M %p") in answer
+    # The abbreviation follows the zone, so DST needs no code of its own.
+    assert answer.endswith(expected.strftime("%Z"))
+
+
+async def test_a_bad_zone_fails_at_construction_not_mid_turn() -> None:
+    """A config typo must not surface as HUGO apologising mid-sentence."""
+    with pytest.raises(ZoneInfoNotFoundError):
+        CurrentTimeTool("Not/AZone")
 
 
 async def test_extra_arguments_are_ignored_rather_than_rejected() -> None:
     """The model can pass something anyway; a clock has nothing to reject."""
-    assert await CurrentTimeTool().invoke({"timezone": "Europe/Paris"})
+    assert await CurrentTimeTool(_ZONE).invoke({"timezone": "Europe/Paris"})

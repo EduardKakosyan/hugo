@@ -6,6 +6,7 @@ fully deterministic (timing windows are shrunk to tens of milliseconds)."""
 import asyncio
 from collections.abc import AsyncIterator, Callable
 
+import pytest
 from fakes import (
     SPEECH_END_MARKER,
     SPEECH_START_MARKER,
@@ -233,6 +234,45 @@ async def test_sleep_phrase_confirms_then_shuts_the_loop_down() -> None:
     assert tts.spoken_texts == [SLEEP_CONFIRMATION]
     assert thinker.asked == []
     assert robot.recording is False  # run()'s finally still cleaned up
+
+
+@pytest.mark.parametrize(
+    "transcript",
+    [
+        "go to sleep",
+        "your sleep",  # what STT actually returned, live 2026-08-10
+        "don't you sleep",  # and again, the second attempt
+        "go sleep",
+        "goodnight",
+        "Sleep.",
+    ],
+)
+async def test_mangled_sleep_commands_still_sleep(transcript: str) -> None:
+    """Sleep is matched on its last word: the -21dB awake mic mangles the
+    leading words, and the user has already walked away when it fails."""
+    sleep_calls: list[bool] = []
+    loop, _robot, _tts, _stt, _thinker = _build_loop(
+        stt=FakeSttSession(final_text=transcript),
+        on_sleep=lambda: sleep_calls.append(True),
+    )
+
+    assert loop._is_sleep_command(normalize_command(transcript))
+    assert sleep_calls == []  # matching only; the arc above covers the run
+
+
+@pytest.mark.parametrize(
+    "transcript",
+    [
+        "did you sleep well last night",  # long enough to read as a question
+        "i could not sleep at all yesterday",
+        "what time did i go to sleep on friday",
+        "sleep is important",  # "sleep" present, but not the last word
+    ],
+)
+async def test_conversational_uses_of_sleep_are_not_commands(transcript: str) -> None:
+    loop, _robot, _tts, _stt, _thinker = _build_loop()
+
+    assert not loop._is_sleep_command(normalize_command(transcript))
 
 
 async def test_wake_word_interrupts_playback_and_reopens_listening() -> None:
