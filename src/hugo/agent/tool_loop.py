@@ -22,13 +22,12 @@ voice loop's task).
 import json
 import logging
 import re
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 
-import httpx
-from openai.types.chat import ChatCompletionMessageParam
+from openai.types.chat import ChatCompletionMessageParam, ChatCompletionToolParam
 
 from hugo.agent.llm_client import AssistantTurn, LlmClient, ToolCallRequest
-from hugo.agent.web_search import WEB_SEARCH_TOOL_SCHEMA, WebSearchTool
+from hugo.agent.tools import Tool, ToolFailure
 
 logger = logging.getLogger(__name__)
 
@@ -119,15 +118,21 @@ class SentenceStream:
 
 
 class ToolLoop:
+    """The turn loop. It knows how many tools there are and nothing else
+    about them: the collection supplies the schemas it offers the model and
+    the map it dispatches through, both keyed off the schemas themselves,
+    so adding a capability never touches this file (docs/adr/0006)."""
+
     def __init__(
         self,
         llm: LlmClient,
-        web_search: WebSearchTool,
+        tools: Sequence[Tool],
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         on_mood: Callable[[str], None] | None = None,
     ) -> None:
         self._llm = llm
-        self._web_search = web_search
+        self._schemas: list[ChatCompletionToolParam] = [tool.schema for tool in tools]
+        self._by_name: dict[str, Tool] = {tool.schema["function"]["name"]: tool for tool in tools}
         self._on_mood = on_mood
         self._history: list[ChatCompletionMessageParam] = [
             {"role": "system", "content": system_prompt}
@@ -163,9 +168,7 @@ class ToolLoop:
             sentences = SentenceStream()
             turn: AssistantTurn | None = None
             spoke_any = False
-            async for item in self._llm.stream_with_tools(
-                self._history, tools=[WEB_SEARCH_TOOL_SCHEMA]
-            ):
+            async for item in self._llm.stream_with_tools(self._history, tools=self._schemas):
                 if isinstance(item, AssistantTurn):
                     turn = item
                     continue
@@ -186,8 +189,9 @@ class ToolLoop:
             if not spoke_any:
                 yield self._next_acknowledgment()
             for call in turn.tool_calls:
-                result = await self._dispatch(call)
-                self._history.append({"role": "tool", "tool_call_id": call.id, "content": result})
+                result = await self._invoke(call)
+                content = result.text if isinstance(result, ToolFailure) else result
+                self._history.append({"role": "tool", "tool_call_id": call.id, "content": content})
 
         logger.warning("hit _MAX_TOOL_ITERATIONS without a final answer")
         yield "Sorry, I'm having trouble completing that search right now."
@@ -197,13 +201,24 @@ class ToolLoop:
         self._acknowledgment_count += 1
         return acknowledgment
 
-    async def _dispatch(self, call: ToolCallRequest) -> str:
-        if call.name != "web_search":
-            return f"unknown tool: {call.name}"
+    async def _invoke(self, call: ToolCallRequest) -> str | ToolFailure:
+        """Resolves a call through the schema-derived map and runs it.
+
+        These two are the loop's own failures — the only ones it can
+        recognise without knowing what any tool does — and neither can go
+        differently on a second attempt. Everything past here is the tool's
+        to classify (agent/tools/__init__.py)."""
+        tool = self._by_name.get(call.name)
+        if tool is None:
+            return ToolFailure(f"there's no tool called {call.name}.", retryable=False)
         try:
-            query = json.loads(call.arguments)["query"]
-            return await self._web_search.search(query)
-        except (json.JSONDecodeError, KeyError) as exc:
-            return f"invalid web search arguments: {exc}"
-        except httpx.HTTPError as exc:
-            return f"web search failed: {exc}"
+            # A no-argument tool can arrive with an empty arguments string
+            # rather than "{}"; that's an empty call, not a broken one.
+            arguments = json.loads(call.arguments) if call.arguments.strip() else {}
+        except json.JSONDecodeError:
+            arguments = None
+        if not isinstance(arguments, dict):
+            return ToolFailure(
+                f"the arguments for {call.name} weren't valid JSON.", retryable=False
+            )
+        return await tool.invoke(arguments)

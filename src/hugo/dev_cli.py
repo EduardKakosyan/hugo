@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import typer
 
-from hugo.agent.web_search import WebSearchTool
+from hugo.agent.tools.web_search import WebSearchTool
 from hugo.config import load_config
 from hugo.logging_setup import configure_logging
 from hugo.robot.reachy_client import ReachyMiniClient, _downmix_to_mono, _float32_to_pcm16

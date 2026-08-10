@@ -4,6 +4,8 @@ ordering, history accumulation, and error degradation, all with no server."""
 
 from typing import Any
 
+from openai.types.chat import ChatCompletionToolParam
+
 from hugo.agent.llm_client import AssistantTurn, ToolCallRequest
 from hugo.agent.tool_loop import (
     ACKNOWLEDGMENTS,
@@ -12,6 +14,7 @@ from hugo.agent.tool_loop import (
     ToolLoop,
     speechify,
 )
+from hugo.agent.tools import ToolFailure
 
 
 def _turn(content: str = "", calls: list[ToolCallRequest] | None = None) -> AssistantTurn:
@@ -37,14 +40,30 @@ class _FakeStreamingLlm:
         yield turn
 
 
-class _FakeWebSearchTool:
-    def __init__(self, result: str = "search result") -> None:
-        self.result = result
-        self.queries: list[str] = []
+class _FakeTool:
+    """Satisfies the Tool Protocol structurally — no subclassing, the same
+    convention as tests/unit/voice/fakes.py. Records the argument dicts it
+    was invoked with."""
 
-    async def search(self, query: str) -> str:
-        self.queries.append(query)
-        return self.result
+    def __init__(
+        self,
+        name: str = "web_search",
+        result: str | ToolFailure = "search result",
+    ) -> None:
+        self.schema: ChatCompletionToolParam = {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": f"fake {name}",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        self.calls: list[dict[str, Any]] = []
+        self._result = result
+
+    async def invoke(self, arguments: dict[str, Any]) -> str | ToolFailure:
+        self.calls.append(arguments)
+        return self._result
 
 
 async def _think_all(loop: ToolLoop, text: str) -> list[str]:
@@ -55,7 +74,7 @@ async def test_reply_streams_out_sentence_by_sentence() -> None:
     llm = _FakeStreamingLlm(
         [(["Hel", "lo there. How", " are you"], _turn("Hello there. How are you"))]
     )
-    loop = ToolLoop(llm, web_search=_FakeWebSearchTool())  # type: ignore[arg-type]
+    loop = ToolLoop(llm, tools=[_FakeTool()])
 
     utterances = await _think_all(loop, "hi hugo")
 
@@ -66,7 +85,7 @@ async def test_reply_streams_out_sentence_by_sentence() -> None:
 
 async def test_think_sends_system_prompt_then_user_turn() -> None:
     llm = _FakeStreamingLlm([(["hi there"], _turn("hi there"))])
-    loop = ToolLoop(llm, web_search=_FakeWebSearchTool())  # type: ignore[arg-type]
+    loop = ToolLoop(llm, tools=[_FakeTool()])
 
     await _think_all(loop, "what time is it")
 
@@ -75,9 +94,20 @@ async def test_think_sends_system_prompt_then_user_turn() -> None:
     assert sent[1] == {"role": "user", "content": "what time is it"}
 
 
+async def test_every_tools_schema_is_offered_to_the_model() -> None:
+    """The loop names no tool: it sends whatever the collection carries."""
+    llm = _FakeStreamingLlm([(["ok."], _turn("ok."))])
+    loop = ToolLoop(llm, tools=[_FakeTool("web_search"), _FakeTool("get_current_time")])
+
+    await _think_all(loop, "hi")
+
+    offered = [schema["function"]["name"] for schema in llm.seen_tools[0]]
+    assert offered == ["web_search", "get_current_time"]
+
+
 async def test_conversation_history_accumulates_across_turns() -> None:
     llm = _FakeStreamingLlm([(["ok."], _turn("ok.")), (["ok2."], _turn("ok2."))])
-    loop = ToolLoop(llm, web_search=_FakeWebSearchTool())  # type: ignore[arg-type]
+    loop = ToolLoop(llm, tools=[_FakeTool()])
 
     await _think_all(loop, "first question")
     await _think_all(loop, "second question")
@@ -97,15 +127,15 @@ async def test_model_preamble_is_the_acknowledgment_for_a_tool_call() -> None:
             (["It's sunny."], _turn("It's sunny.")),
         ]
     )
-    web_search = _FakeWebSearchTool(result="sunny today")
-    loop = ToolLoop(llm, web_search=web_search)  # type: ignore[arg-type]
+    web_search = _FakeTool(result="sunny today")
+    loop = ToolLoop(llm, tools=[web_search])
 
     utterances = await _think_all(loop, "what's the weather")
 
     # The model's own preamble was spoken (no canned phrase added), the
     # search ran, and the final answer followed.
     assert utterances == ["Let me search for that.", "It's sunny."]
-    assert web_search.queries == ["weather"]
+    assert web_search.calls == [{"query": "weather"}]
     second_call_messages = llm.seen_messages[1]
     tool_message = next(m for m in second_call_messages if m.get("role") == "tool")
     assert tool_message == {"role": "tool", "tool_call_id": "call_1", "content": "sunny today"}
@@ -121,7 +151,7 @@ async def test_silent_tool_call_gets_a_canned_acknowledgment() -> None:
             (["It's sunny."], _turn("It's sunny.")),
         ]
     )
-    loop = ToolLoop(llm, web_search=_FakeWebSearchTool())  # type: ignore[arg-type]
+    loop = ToolLoop(llm, tools=[_FakeTool()])
 
     utterances = await _think_all(loop, "what's the weather")
 
@@ -139,19 +169,56 @@ async def test_unknown_tool_reports_and_continues() -> None:
             (["Can't do that."], _turn("Can't do that.")),
         ]
     )
-    loop = ToolLoop(llm, web_search=_FakeWebSearchTool())  # type: ignore[arg-type]
+    loop = ToolLoop(llm, tools=[])
 
     utterances = await _think_all(loop, "teleport me")
 
     assert utterances[-1] == "Can't do that."
     tool_message = next(m for m in llm.seen_messages[1] if m.get("role") == "tool")
-    assert "unknown tool" in tool_message["content"]
+    assert "no tool called teleport" in tool_message["content"]
+
+
+async def test_malformed_arguments_are_reported_to_the_model() -> None:
+    """vLLM takes the unconstrained tool_choice="auto" path, so arguments
+    reach the loop unvalidated and really can be broken JSON."""
+    call = ToolCallRequest(id="call_1", name="web_search", arguments='{"query": ')
+    llm = _FakeStreamingLlm(
+        [
+            ([], _turn(calls=[call])),
+            (["Let me try again differently."], _turn("Let me try again differently.")),
+        ]
+    )
+    web_search = _FakeTool()
+    loop = ToolLoop(llm, tools=[web_search])
+
+    await _think_all(loop, "what's the weather")
+
+    tool_message = next(m for m in llm.seen_messages[1] if m.get("role") == "tool")
+    assert "weren't valid JSON" in tool_message["content"]
+    assert web_search.calls == []
+
+
+async def test_tool_failure_text_reaches_the_model_as_the_tool_result() -> None:
+    call = ToolCallRequest(id="call_1", name="web_search", arguments='{"query": "weather"}')
+    llm = _FakeStreamingLlm(
+        [
+            ([], _turn(calls=[call])),
+            (["I couldn't reach search."], _turn("I couldn't reach search.")),
+        ]
+    )
+    failure = ToolFailure("the web search service didn't answer.", retryable=True)
+    loop = ToolLoop(llm, tools=[_FakeTool(result=failure)])
+
+    await _think_all(loop, "what's the weather")
+
+    tool_message = next(m for m in llm.seen_messages[1] if m.get("role") == "tool")
+    assert tool_message["content"] == failure.text
 
 
 async def test_falls_back_after_max_tool_iterations() -> None:
     call = ToolCallRequest(id="call_1", name="web_search", arguments='{"query": "x"}')
     llm = _FakeStreamingLlm([([], _turn(calls=[call]))])  # always calls a tool
-    loop = ToolLoop(llm, web_search=_FakeWebSearchTool())  # type: ignore[arg-type]
+    loop = ToolLoop(llm, tools=[_FakeTool()])
 
     utterances = await _think_all(loop, "loop forever")
 
@@ -164,7 +231,7 @@ async def test_llm_failure_degrades_to_a_spoken_apology() -> None:
             raise RuntimeError("boom")
             yield ""  # unreachable; makes this an async generator
 
-    loop = ToolLoop(_ExplodingLlm(), web_search=_FakeWebSearchTool())  # type: ignore[arg-type]
+    loop = ToolLoop(_ExplodingLlm(), tools=[_FakeTool()])
 
     utterances = await _think_all(loop, "hi")
 
@@ -195,7 +262,7 @@ async def test_mood_tag_is_stripped_reported_and_never_spoken() -> None:
     llm = _FakeStreamingLlm(
         [(["[cheerful] Grea", "t news. It works."], _turn("[cheerful] Great news. It works."))]
     )
-    loop = ToolLoop(llm, web_search=_FakeWebSearchTool(), on_mood=moods.append)  # type: ignore[arg-type]
+    loop = ToolLoop(llm, tools=[_FakeTool()], on_mood=moods.append)
 
     utterances = await _think_all(loop, "did it work")
 
@@ -208,7 +275,7 @@ async def test_mood_tag_is_stripped_reported_and_never_spoken() -> None:
 async def test_untagged_reply_speaks_unchanged_with_no_mood_report() -> None:
     moods: list[str] = []
     llm = _FakeStreamingLlm([(["Plain answer."], _turn("Plain answer."))])
-    loop = ToolLoop(llm, web_search=_FakeWebSearchTool(), on_mood=moods.append)  # type: ignore[arg-type]
+    loop = ToolLoop(llm, tools=[_FakeTool()], on_mood=moods.append)
 
     assert await _think_all(loop, "hi") == ["Plain answer."]
     assert moods == []
@@ -219,7 +286,7 @@ async def test_tag_on_its_own_line_is_not_spoken_as_an_empty_utterance() -> None
     llm = _FakeStreamingLlm(
         [(["[thoughtful]\n", "Well, maybe."], _turn("[thoughtful]\nWell, maybe."))]
     )
-    loop = ToolLoop(llm, web_search=_FakeWebSearchTool(), on_mood=moods.append)  # type: ignore[arg-type]
+    loop = ToolLoop(llm, tools=[_FakeTool()], on_mood=moods.append)
 
     assert await _think_all(loop, "hmm") == ["Well, maybe."]
     assert moods == ["thoughtful"]
@@ -230,6 +297,6 @@ async def test_mood_callback_failure_never_breaks_speech() -> None:
         raise RuntimeError("motion layer exploded")
 
     llm = _FakeStreamingLlm([(["[excited] Yes."], _turn("[excited] Yes."))])
-    loop = ToolLoop(llm, web_search=_FakeWebSearchTool(), on_mood=boom)  # type: ignore[arg-type]
+    loop = ToolLoop(llm, tools=[_FakeTool()], on_mood=boom)
 
     assert await _think_all(loop, "hi") == ["Yes."]

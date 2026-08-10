@@ -73,13 +73,14 @@ class Config(BaseSettings):
     # hardware.
     playback_gain: float = 1.0
 
-    # v1's only LLM tool (web search, via Tavily). Loads as HUGO_TAVILY_API_KEY
-    # like everything else here, even though Tavily's own docs usually expect
-    # a bare TAVILY_API_KEY -- passed explicitly into WebSearchTool rather
-    # than auto-read by any SDK. Optional here (not required) so Config stays
-    # constructible for hugo dev subcommands and tests that don't touch
-    # search; orchestrator.run() fails fast on a missing key instead, since
-    # that's the only path that actually needs it.
+    # Credential for the web search tool (Tavily). Loads as
+    # HUGO_TAVILY_API_KEY like everything else here, even though Tavily's own
+    # docs usually expect a bare TAVILY_API_KEY -- passed explicitly into
+    # WebSearchTool rather than auto-read by any SDK. Optional, and missing
+    # it is not a startup failure: build_tools() leaves web search out of the
+    # tool set with a warning and HUGO runs without that capability (see
+    # docs/adr/0006). `hugo dev search` keeps its own hard check, since it is
+    # a Tavily diagnostic rather than a path through the tool set.
     tavily_api_key: str | None = None
 
     # Where the per-service venvs created by scripts/setup_service_venv.sh

@@ -14,7 +14,10 @@ unified memory, aarch64/CUDA). Domain glossary: `CONTEXT.md`. Decisions:
   Manage with `uv pip install --python .venv-X/bin/python ...` (no pip binary).
 - Secrets: `~/.hugo_secrets` on dgx1, plain `KEY=VALUE` lines (systemd
   EnvironmentFile format — no `export`). Holds `HUGO_TAVILY_API_KEY`,
-  `HUGO_PLAYBACK_GAIN`.
+  `HUGO_PLAYBACK_GAIN`. **A missing credential costs a capability, not a
+  startup** (ADR 0006): `build_tools()` leaves that tool out of the set with a
+  journald warning, so a typo here shows up as HUGO saying it can't search
+  rather than as a service that won't boot. Check the warnings after editing it.
 
 ## Branch worktrees across both machines
 

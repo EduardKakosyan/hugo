@@ -22,6 +22,10 @@ _Avoid_: "Session" (overloaded with process lifecycle)
 **Follow-up window**:
 The short period (~6 seconds) after HUGO finishes a reply during which the mic stays open and the user can speak again without repeating the wake word. Expiry ends the conversation with an audible cue.
 
+**Tool**:
+A capability HUGO can invoke mid-turn, carrying its own schema (which is where its name lives) and knowing how to run itself and how to classify its own failures — see [ADR 0006](./docs/adr/0006-tools-are-a-collection.md). The tool set is a collection assembled at startup, so "how many tools does HUGO have" is a data question; a tool whose dependency is missing is left out of the set and the model never sees its schema. Not every tool is written in Python: an MCP server's tools join the same collection as adapters.
+_Avoid_: "Skill", "function", "plugin" — and don't say "the tool loop knows about X"; it only knows what the collection carries.
+
 **Acknowledgment**:
 A short spoken confirmation, delivered the moment HUGO commits to a slow action, naming what it's about to do ("let me search for that"). Followed by brief progress updates if the work runs long. Distinct from the reply — it promises one, it isn't one.
 _Avoid_: "Filler" (the acknowledgment carries information; it isn't dead air)

@@ -16,11 +16,13 @@ import asyncio
 import json
 import math
 import time
+from typing import Any
 
 import pytest
 import websockets
 
 from hugo.agent.llm_client import AssistantTurn, LlmClient
+from hugo.agent.tools.web_search import WebSearchTool
 from hugo.config import Config
 
 pytestmark = pytest.mark.integration
@@ -86,8 +88,6 @@ async def test_reasoning_trace_never_reaches_spoken_content(config: Config) -> N
 
 async def test_streamed_tool_call_parses(config: Config) -> None:
     await _require_llm(config)
-    from hugo.agent.web_search import WEB_SEARCH_TOOL_SCHEMA
-
     client = LlmClient(base_url=config.llm_base_url, model=config.llm_model)
     turn: AssistantTurn | None = None
     async for item in client.stream_with_tools(
@@ -98,7 +98,7 @@ async def test_streamed_tool_call_parses(config: Config) -> None:
             },
             {"role": "user", "content": "Search the web for today's weather in Halifax."},
         ],
-        tools=[WEB_SEARCH_TOOL_SCHEMA],
+        tools=[WebSearchTool.schema],
     ):
         if isinstance(item, AssistantTurn):
             turn = item
@@ -133,10 +133,13 @@ async def test_tts_first_audio_latency(config: Config) -> None:
 
 class _StubWebSearch:
     """Real Tavily isn't under test (and needs a key); the LLM+ToolLoop
-    behavior is."""
+    behavior is. Carries the production schema so the model is choosing
+    against exactly what it sees live."""
 
-    async def search(self, query: str) -> str:
-        return f"stub result for: {query}"
+    schema = WebSearchTool.schema
+
+    async def invoke(self, arguments: dict[str, Any]) -> str:
+        return f"stub result for: {arguments.get('query')}"
 
 
 async def test_live_reply_to_what_can_you_do_sounds_like_a_person(config: Config) -> None:
@@ -149,7 +152,7 @@ async def test_live_reply_to_what_can_you_do_sounds_like_a_person(config: Config
     from hugo.agent.tool_loop import ToolLoop
 
     llm = LlmClient(base_url=config.llm_base_url, model=config.llm_model)
-    loop = ToolLoop(llm, web_search=_StubWebSearch())  # type: ignore[arg-type]
+    loop = ToolLoop(llm, tools=[_StubWebSearch()])
 
     started = time.monotonic()
     first_utterance_at: float | None = None
@@ -223,7 +226,7 @@ async def test_full_cascade_round_trip_no_human_required(config: Config) -> None
 
     # 4. The LLM answers what STT heard.
     llm = LlmClient(base_url=config.llm_base_url, model=config.llm_model)
-    loop = ToolLoop(llm, web_search=_StubWebSearch())  # type: ignore[arg-type]
+    loop = ToolLoop(llm, tools=[_StubWebSearch()])
     utterances = [u async for u in loop.think(transcript)]
     reply = " ".join(utterances)
     print(f"cascade reply: {reply}")
