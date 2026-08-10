@@ -27,8 +27,8 @@ A capability HUGO can invoke mid-turn, carrying its own schema (which is where i
 _Avoid_: "Skill", "function", "plugin" — and don't say "the tool loop knows about X"; it only knows what the collection carries.
 
 **Acknowledgment**:
-A short spoken confirmation, delivered the moment HUGO commits to a slow action, naming what it's about to do ("let me search for that"). Followed by brief progress updates if the work runs long. Distinct from the reply — it promises one, it isn't one.
-_Avoid_: "Filler" (the acknowledgment carries information; it isn't dead air)
+A short spoken line that covers a wait HUGO has already measured: the tool runs, HUGO waits about a second on it (`acknowledge_after_s`), and only work still running by then is announced — so a tool that returns instantly is never announced at all. A turn gets at most one, however many tools it takes, and anything the model said ahead of the call counts as the acknowledgment. Wording is tool-neutral, because HUGO cannot know in advance which capability is the slow one. Followed by brief progress updates if the work runs long. Distinct from the reply — it promises one, it isn't one.
+_Avoid_: "Filler" (the acknowledgment carries information; it isn't dead air), and don't say HUGO announces "before" a tool — it announces *during* one
 
 **Stop phrase**:
 An exact spoken phrase ("stop", "that's all", "never mind") that ends the conversation immediately. HUGO stays awake: models remain loaded and the wake word still works. Matched deterministically on the transcript — never interpreted by the LLM.

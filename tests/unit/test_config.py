@@ -20,6 +20,22 @@ def test_pidfile_and_memory_db_paths_live_under_state_dir(tmp_path: Path) -> Non
     assert config.memory_db_path == tmp_path / "memory.db"
 
 
+def test_acknowledge_after_s_defaults_below_the_progress_nudge() -> None:
+    """The two "still working" mechanisms divide by duration: the agent covers
+    the short gap, the voice loop's wall-clock nudge the long one."""
+    config = Config()
+
+    assert config.acknowledge_after_s == 1.0
+    assert config.acknowledge_after_s < config.progress_update_after_s
+
+
+def test_acknowledge_after_s_loads_from_env(monkeypatch) -> None:
+    """Tunable by ear on the robot, without a deploy."""
+    monkeypatch.setenv("HUGO_ACKNOWLEDGE_AFTER_S", "0.4")
+
+    assert load_config().acknowledge_after_s == 0.4
+
+
 def test_tavily_api_key_defaults_to_none() -> None:
     assert Config().tavily_api_key is None
 

@@ -6,12 +6,17 @@ ready to speak, in speaking order. Reply text is sentence-split as LLM
 deltas arrive, so the first sentence reaches TTS while the model is still
 generating the rest.
 
-Tool turns are never silent: whatever content the model produced before a
-tool call has already been yielded (that's the acknowledgment — CONTEXT.md);
-if it called a tool with no preamble at all, a canned acknowledgment is
-yielded instead. The "still working" nudge for long tool turns lives in the
-voice loop (gap-based, so it also covers a slow LLM pass), not here — a
-generator can't emit on a timer while it's blocked inside a tool await.
+Tool turns are never silent, but they aren't narrated either: the
+acknowledgment races the tool. Each call runs as a task, the loop waits
+`acknowledge_after_s` on it, and the canned phrase is yielded only if the
+tool is still running — so a tool that returns in microseconds draws
+nothing and only genuinely slow work gets announced. Whatever the model
+said before the call counts as the acknowledgment (CONTEXT.md), and a turn
+gets at most one however many tools it takes: a chain of tools is still one
+question from the user's side. The "still working" nudge for the long tail
+lives in the voice loop (gap-based, so it also covers a slow LLM pass), not
+here — a generator can't emit on a timer while it's blocked inside a tool
+await.
 
 Errors degrade to a spoken apology rather than propagating: the Thinker is
 the system boundary isolating the voice loop from network/model/parsing
@@ -19,6 +24,7 @@ failures (the original incident: a real 400 from vLLM silently killed the
 voice loop's task).
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -46,11 +52,14 @@ DEFAULT_SYSTEM_PROMPT = (
     "markdown, no bullet points, no headers, no emojis, and never read "
     "out symbols or URLs. Lead with the answer in your first sentence. "
     "Keep replies to one to three short sentences unless the user "
-    "explicitly asks for more detail. Before you call a tool, say one "
-    "short sentence telling the user what you're about to do. When you "
-    "use web search, weave what you found into a natural spoken answer "
-    "and name the source briefly rather than citing links. If you don't "
-    "know something or a search comes up empty, say so plainly. "
+    "explicitly asks for more detail. Don't announce that you're about "
+    "to use a tool — use it and answer. When a tool gives you results, "
+    "weave them into a natural spoken answer and name the source "
+    "briefly rather than citing links. If you don't know something, or "
+    "a tool comes up empty or fails, say so plainly. "
+    "You have no idea what day or time it is unless you ask: call "
+    "get_current_time before answering anything that depends on today, "
+    "tomorrow, this week, or how long ago something was. "
     "Start every reply with exactly one mood tag in square brackets — "
     "[neutral], [cheerful], [thoughtful], [apologetic], [excited], or "
     "[curious] — matching what you're about to say; it drives your body "
@@ -70,12 +79,15 @@ _MAX_TOOL_ITERATIONS = 4
 _BULLET_PREFIX = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+", re.MULTILINE)
 _MARKDOWN_TOKENS = re.compile(r"[*_#`]+")
 
-# Rotated through when the model calls a tool without saying anything first,
-# so slow work is never silent (VEN-56: acknowledge + updates).
+# Rotated through when a tool is still running after acknowledge_after_s and
+# the model said nothing first, so slow work is never silent (VEN-56:
+# acknowledge + updates). Deliberately tool-NEUTRAL: "let me look that up"
+# was written when the only tool was a web search, and it's wrong for
+# remembering a fact — as it will be for most of what MCP brings.
 ACKNOWLEDGMENTS = (
-    "Let me look that up.",
     "One moment, checking that now.",
-    "Let me check on that.",
+    "Just a second.",
+    "Give me a moment on that.",
 )
 
 
@@ -129,11 +141,13 @@ class ToolLoop:
         tools: Sequence[Tool],
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         on_mood: Callable[[str], None] | None = None,
+        acknowledge_after_s: float = 1.0,
     ) -> None:
         self._llm = llm
         self._schemas: list[ChatCompletionToolParam] = [tool.schema for tool in tools]
         self._by_name: dict[str, Tool] = {tool.schema["function"]["name"]: tool for tool in tools}
         self._on_mood = on_mood
+        self._acknowledge_after_s = acknowledge_after_s
         self._history: list[ChatCompletionMessageParam] = [
             {"role": "system", "content": system_prompt}
         ]
@@ -164,6 +178,11 @@ class ToolLoop:
             yield "Sorry, I ran into a problem thinking about that."
 
     async def _respond(self) -> AsyncIterator[str]:
+        # Per turn, not per pass: a chain of tools (the date, then the
+        # notes) is one question from the user's side, so it gets one
+        # acknowledgment rather than a hop-by-hop narration. A genuinely
+        # long chain is the voice loop's 8s nudge to cover.
+        acknowledged = False
         for _ in range(_MAX_TOOL_ITERATIONS):
             sentences = SentenceStream()
             turn: AssistantTurn | None = None
@@ -186,12 +205,32 @@ class ToolLoop:
             if not turn.tool_calls:
                 return
 
-            if not spoke_any:
-                yield self._next_acknowledgment()
+            # Anything the model said ahead of the call IS the
+            # acknowledgment, so it suppresses the canned one.
+            acknowledged = acknowledged or spoke_any
             for call in turn.tool_calls:
-                result = await self._invoke(call)
-                content = result.text if isinstance(result, ToolFailure) else result
-                self._history.append({"role": "tool", "tool_call_id": call.id, "content": content})
+                task = asyncio.create_task(self._invoke(call))
+                try:
+                    # Race the tool rather than predicting its latency: the
+                    # phrase is only worth saying if the wait is real, and
+                    # no per-tool "is this slow?" metadata could know that
+                    # for an MCP tool nobody has timed.
+                    await asyncio.wait([task], timeout=self._acknowledge_after_s)
+                    if not task.done() and not acknowledged:
+                        acknowledged = True
+                        yield self._next_acknowledgment()
+                    result = await task
+                    content = result.text if isinstance(result, ToolFailure) else result
+                    self._history.append(
+                        {"role": "tool", "tool_call_id": call.id, "content": content}
+                    )
+                finally:
+                    # Barge-in cancels this generator wherever it happens to
+                    # be, which can be either await above; carry the
+                    # cancellation into the tool the way a plain `await`
+                    # used to, rather than orphaning a task nobody collects.
+                    # A no-op once the task is done.
+                    task.cancel()
 
         logger.warning("hit _MAX_TOOL_ITERATIONS without a final answer")
         yield "Sorry, I'm having trouble completing that search right now."

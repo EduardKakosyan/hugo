@@ -49,6 +49,15 @@ class Config(BaseSettings):
     follow_up_window_s: float = 6.0
     max_utterance_s: float = 30.0
     progress_update_after_s: float = 8.0
+    # How long a tool may run before HUGO says something about it (the
+    # agent-side acknowledgment races the tool — see agent/tool_loop.py).
+    # Sits below progress_update_after_s by construction: the agent covers
+    # the short gap, the voice loop's wall-clock nudge covers the long one.
+    # The tradeoff is asymmetric on purpose — TTS needs ~460ms to produce
+    # audio (measured, tests/integration), so a tool finishing at ~1.2s can
+    # still draw a phrase it turned out not to need. A redundant phrase is
+    # the tolerable error; silence is not. Tune by ear on the robot.
+    acknowledge_after_s: float = 1.0
     # Wake-word score that interrupts HUGO mid-speech. Lower than the
     # idle detection threshold (0.5): the speaker is centimeters from the
     # mic with no AEC, so a real "hey jarvis" scores lower during

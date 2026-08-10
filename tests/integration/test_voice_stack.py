@@ -16,12 +16,14 @@ import asyncio
 import json
 import math
 import time
+from datetime import datetime
 from typing import Any
 
 import pytest
 import websockets
 
 from hugo.agent.llm_client import AssistantTurn, LlmClient
+from hugo.agent.tools.current_time import CurrentTimeTool
 from hugo.agent.tools.web_search import WebSearchTool
 from hugo.config import Config
 
@@ -183,6 +185,36 @@ async def test_live_reply_to_what_can_you_do_sounds_like_a_person(config: Config
     # feeding it must arrive faster still. 8s is the generous ceiling
     # before this fails as a regression.
     assert first_utterance_at is not None and first_utterance_at < 8.0
+
+
+async def test_a_date_question_uses_the_time_tool_and_draws_no_filler(config: Config) -> None:
+    """The live half of the tool-selection question: with two schemas in the
+    request the model has to pick one, which is the first thing the pinned
+    qwen3_coder parser has been asked to do here. It also proves the timing
+    change end to end — get_current_time returns in microseconds, so the
+    acknowledgment race should leave the turn with no canned phrase at all."""
+    await _require_llm(config)
+    from hugo.agent.tool_loop import ACKNOWLEDGMENTS, ToolLoop
+
+    llm = LlmClient(base_url=config.llm_base_url, model=config.llm_model)
+    loop = ToolLoop(
+        llm,
+        tools=[CurrentTimeTool(), _StubWebSearch()],
+        acknowledge_after_s=config.acknowledge_after_s,
+    )
+
+    utterances = [utterance async for utterance in loop.think("What day is it today?")]
+    reply = " ".join(utterances)
+    print(f"\ndate reply: {reply}")
+
+    now = datetime.now().astimezone()
+    assert now.strftime("%A").lower() in reply.lower(), (
+        f"reply doesn't name today's weekday — did it call get_current_time? {reply!r}"
+    )
+    assert str(now.day) in reply
+    assert not [u for u in utterances if u in ACKNOWLEDGMENTS], (
+        f"a microsecond tool drew a filler phrase: {utterances!r}"
+    )
 
 
 async def test_full_cascade_round_trip_no_human_required(config: Config) -> None:

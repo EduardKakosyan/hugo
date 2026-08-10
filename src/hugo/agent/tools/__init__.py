@@ -121,9 +121,10 @@ def build_tools(config: Config) -> list[Tool]:
     """
     # Deferred: every tool module imports the seam from this package, so a
     # module-level import here would be a cycle.
+    from hugo.agent.tools.current_time import CurrentTimeTool
     from hugo.agent.tools.web_search import WebSearchTool
 
-    tools: list[Tool] = []
+    tools: list[Tool] = [CurrentTimeTool()]
     if config.tavily_api_key:
         tools.append(WebSearchTool(config.tavily_api_key))
     else:

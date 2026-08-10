@@ -1,7 +1,8 @@
 """Streaming ToolLoop tests against a fake streaming LLM client — proves
-sentence-by-sentence utterance emission, acknowledgment-before-tool
-ordering, history accumulation, and error degradation, all with no server."""
+sentence-by-sentence utterance emission, the acknowledgment racing the tool,
+history accumulation, and error degradation, all with no server."""
 
+import asyncio
 from typing import Any
 
 from openai.types.chat import ChatCompletionToolParam
@@ -40,15 +41,24 @@ class _FakeStreamingLlm:
         yield turn
 
 
+# Shrinks the acknowledgment race to a sub-millisecond window, the same
+# trick _build_loop uses on the voice loop's timing — a scripted delay beats
+# waiting out a real second.
+_ACK_AFTER_S = 0.01
+_SLOWER_THAN_THE_RACE_S = 0.05
+
+
 class _FakeTool:
     """Satisfies the Tool Protocol structurally — no subclassing, the same
     convention as tests/unit/voice/fakes.py. Records the argument dicts it
-    was invoked with."""
+    was invoked with, and `delay` scripts latency so the acknowledgment race
+    is deterministic (as FakeThinker.delay_before_each does for the nudge)."""
 
     def __init__(
         self,
         name: str = "web_search",
         result: str | ToolFailure = "search result",
+        delay: float = 0.0,
     ) -> None:
         self.schema: ChatCompletionToolParam = {
             "type": "function",
@@ -60,14 +70,21 @@ class _FakeTool:
         }
         self.calls: list[dict[str, Any]] = []
         self._result = result
+        self._delay = delay
 
     async def invoke(self, arguments: dict[str, Any]) -> str | ToolFailure:
         self.calls.append(arguments)
+        if self._delay:
+            await asyncio.sleep(self._delay)
         return self._result
 
 
 async def _think_all(loop: ToolLoop, text: str) -> list[str]:
     return [utterance async for utterance in loop.think(text)]
+
+
+def _acknowledgments(utterances: list[str]) -> list[str]:
+    return [utterance for utterance in utterances if utterance in ACKNOWLEDGMENTS]
 
 
 async def test_reply_streams_out_sentence_by_sentence() -> None:
@@ -143,22 +160,121 @@ async def test_model_preamble_is_the_acknowledgment_for_a_tool_call() -> None:
     assert assistant_message["tool_calls"][0]["function"]["name"] == "web_search"
 
 
-async def test_silent_tool_call_gets_a_canned_acknowledgment() -> None:
-    call = ToolCallRequest(id="call_1", name="web_search", arguments='{"query": "weather"}')
+async def test_a_tool_that_returns_fast_is_never_announced() -> None:
+    """The acknowledgment races the tool instead of firing structurally: with
+    tools that return in microseconds, a canned phrase would be the only slow
+    thing in the turn (docs/adr/0006)."""
+    call = ToolCallRequest(id="call_1", name="get_current_time", arguments="{}")
     llm = _FakeStreamingLlm(
         [
             ([], _turn(calls=[call])),  # no preamble at all
+            (["It's Sunday."], _turn("It's Sunday.")),
+        ]
+    )
+    tool = _FakeTool("get_current_time", result="Sunday, 10 August 2026")
+    loop = ToolLoop(llm, tools=[tool], acknowledge_after_s=_ACK_AFTER_S)
+
+    utterances = await _think_all(loop, "what day is it")
+
+    assert utterances == ["It's Sunday."]
+    assert tool.calls == [{}]
+
+
+async def test_a_slow_tool_gets_one_acknowledgment_before_the_answer() -> None:
+    """Silence is the intolerable failure, so work that outlasts the window
+    is announced — once, ahead of the answer it's covering for."""
+    call = ToolCallRequest(id="call_1", name="web_search", arguments='{"query": "weather"}')
+    llm = _FakeStreamingLlm(
+        [
+            ([], _turn(calls=[call])),
             (["It's sunny."], _turn("It's sunny.")),
         ]
     )
-    loop = ToolLoop(llm, tools=[_FakeTool()])
+    loop = ToolLoop(
+        llm,
+        tools=[_FakeTool(delay=_SLOWER_THAN_THE_RACE_S)],
+        acknowledge_after_s=_ACK_AFTER_S,
+    )
 
     utterances = await _think_all(loop, "what's the weather")
 
-    # Slow work is never silent (VEN-56): a canned acknowledgment precedes
-    # the tool round-trip.
     assert utterances[0] in ACKNOWLEDGMENTS
     assert utterances[-1] == "It's sunny."
+    assert len(_acknowledgments(utterances)) == 1
+
+
+async def test_two_slow_calls_in_one_turn_still_draw_only_one_acknowledgment() -> None:
+    calls = [
+        ToolCallRequest(id="call_1", name="get_current_time", arguments="{}"),
+        ToolCallRequest(id="call_2", name="web_search", arguments='{"query": "weather"}'),
+    ]
+    llm = _FakeStreamingLlm(
+        [
+            ([], _turn(calls=calls)),
+            (["It's sunny today."], _turn("It's sunny today.")),
+        ]
+    )
+    loop = ToolLoop(
+        llm,
+        tools=[
+            _FakeTool("get_current_time", result="Sunday", delay=_SLOWER_THAN_THE_RACE_S),
+            _FakeTool("web_search", delay=_SLOWER_THAN_THE_RACE_S),
+        ],
+        acknowledge_after_s=_ACK_AFTER_S,
+    )
+
+    utterances = await _think_all(loop, "what's the weather today")
+
+    assert len(_acknowledgments(utterances)) == 1
+
+
+async def test_a_chain_across_two_passes_is_announced_once_not_hop_by_hop() -> None:
+    """`acknowledged` is per turn, not per pass: "what did I say I'd do
+    today" checks the date and then the notes, and that is still one question
+    from the user's side."""
+    time_call = ToolCallRequest(id="call_1", name="get_current_time", arguments="{}")
+    recall_call = ToolCallRequest(id="call_2", name="recall_facts", arguments='{"query": "today"}')
+    llm = _FakeStreamingLlm(
+        [
+            ([], _turn(calls=[time_call])),
+            ([], _turn(calls=[recall_call])),
+            (["You said you'd call the dentist."], _turn("You said you'd call the dentist.")),
+        ]
+    )
+    loop = ToolLoop(
+        llm,
+        tools=[
+            _FakeTool("get_current_time", result="Sunday", delay=_SLOWER_THAN_THE_RACE_S),
+            _FakeTool("recall_facts", result="call the dentist", delay=_SLOWER_THAN_THE_RACE_S),
+        ],
+        acknowledge_after_s=_ACK_AFTER_S,
+    )
+
+    utterances = await _think_all(loop, "what did I say I'd do today")
+
+    assert len(_acknowledgments(utterances)) == 1
+    assert utterances[-1] == "You said you'd call the dentist."
+
+
+async def test_a_model_preamble_suppresses_the_canned_phrase_even_when_slow() -> None:
+    """Anything the model said ahead of the call IS the acknowledgment, so a
+    volunteered preamble loses nothing by the phrases being generic."""
+    call = ToolCallRequest(id="call_1", name="web_search", arguments='{"query": "weather"}')
+    llm = _FakeStreamingLlm(
+        [
+            (["Checking the forecast. "], _turn("Checking the forecast. ", [call])),
+            (["It's sunny."], _turn("It's sunny.")),
+        ]
+    )
+    loop = ToolLoop(
+        llm,
+        tools=[_FakeTool(delay=_SLOWER_THAN_THE_RACE_S)],
+        acknowledge_after_s=_ACK_AFTER_S,
+    )
+
+    utterances = await _think_all(loop, "what's the weather")
+
+    assert utterances == ["Checking the forecast.", "It's sunny."]
 
 
 async def test_unknown_tool_reports_and_continues() -> None:
