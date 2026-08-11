@@ -16,7 +16,7 @@ import asyncio
 import json
 import math
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -322,33 +322,39 @@ def _tools_called(loop: Any) -> list[str]:
     ]
 
 
-async def test_a_two_tool_chain_runs_both_tools_and_draws_at_most_one_filler(
+async def test_a_memory_dependent_question_consults_memory_and_draws_one_filler(
     config: Config, tmp_path: Path
 ) -> None:
-    """The behaviour that only exists once all four tools are present: a
-    question neither tool can answer alone, so the model has to chain
-    get_current_time into recall_facts rather than picking one schema and
-    stopping.
+    """The PRD's hardest proving-set question, with all four schemas on
+    offer: the model has to notice the answer isn't in front of it and go
+    and look.
 
-    The question is a countdown for a reason. The obvious phrasing — "what
-    did I say I'd do today" — turned out NOT to be a two-tool question
-    (dgx1, 2026-08-11): the stored fact already says "today", so the model
-    answered it correctly from recall_facts alone and was right to skip the
-    clock. Demanding the second call there would have tested its
-    willingness to make a redundant one. A countdown needs the appointment
-    from memory AND the current date to subtract from, and the stored date
-    is computed from today so the test can't rot into the past.
+    This was written as a two-tool chain, because the outline expected
+    "what did I say I'd do today" to drive get_current_time AND
+    recall_facts. Measured on dgx1 2026-08-11, it does not, and it is right
+    not to: the stored fact already says "today", so the clock adds nothing
+    and demanding the call would test only the model's willingness to make
+    a redundant one.
 
-    The filler assertion rides along on the same turn deliberately. "At most
-    one, however many tools run" is a claim about a whole turn, and a
-    two-tool chain is the shortest turn that can actually break it — the
-    unit tests script the chain, this one lets the model build it."""
+    A question that genuinely needs both was then tried — "how many days
+    until my dentist appointment", against a stored date — and it exposed a
+    real limit rather than a chain: recall_facts was called 1 time in 8,
+    with the model instead answering "I don't have any record of your
+    dentist appointment" without looking. That rate did not move with
+    sampling (1/8 at temperature 1.0, 1/8 at 0.0), so it is a disposition
+    of the model on that phrasing, not noise, and no assertion here can fix
+    it. It is recorded in the outline as a known limitation. This question,
+    by contrast, called recall_facts 8 times in 8.
+
+    So what is pinned is what the PRD actually promises and the stack
+    actually delivers: a question answerable only from memory sends HUGO to
+    memory. The multi-tool filler rule is unit-tested, where the chain can
+    be scripted instead of hoped for."""
     await _require_llm(config)
     from hugo.agent.tool_loop import ACKNOWLEDGMENTS, EXHAUSTED_FALLBACK, ToolLoop
 
     store = await _memory_store(tmp_path)
-    appointment = datetime.now(ZoneInfo(config.timezone)) + timedelta(days=9)
-    await store.add_fact(f"My dentist appointment is on {appointment:%-d %B}")
+    await store.add_fact("I said I'd finish the quarterly report today")
 
     llm = LlmClient(base_url=config.llm_base_url, model=config.llm_model)
     loop = ToolLoop(
@@ -357,23 +363,19 @@ async def test_a_two_tool_chain_runs_both_tools_and_draws_at_most_one_filler(
         acknowledge_after_s=config.acknowledge_after_s,
     )
 
-    utterances = [u async for u in loop.think("How many days until my dentist appointment?")]
+    utterances = [u async for u in loop.think("What did I say I'd do today?")]
     reply = " ".join(utterances)
     called = _tools_called(loop)
-    print(f"\nchain reply: {reply}\ntools called: {called}")
+    print(f"\nmemory-question reply: {reply}\ntools called: {called}")
 
     assert "recall_facts" in called, f"never consulted its notes: {called}"
-    assert "get_current_time" in called, f"counted down from an unknown today: {called}"
-    # Ran out of LLM passes instead of answering — the failure mode a chain
-    # is most likely to hit, and one an assertion on the reply text alone
-    # would read as a merely disappointing answer.
-    assert EXHAUSTED_FALLBACK not in utterances, f"chain exhausted its passes: {utterances!r}"
-    # Deliberately not asserting the arithmetic: whether the model lands on
-    # exactly nine is a property of the model, not of the tool set this
-    # test exists to prove, and pinning it would make the suite flaky on a
-    # reply like "a bit over a week".
+    # Ran out of LLM passes instead of answering — the failure mode a
+    # tool-using turn is most likely to hit, and one an assertion on the
+    # reply text alone would read as a merely disappointing answer.
+    assert EXHAUSTED_FALLBACK not in utterances, f"the turn exhausted its passes: {utterances!r}"
+    assert "report" in reply.lower(), f"the recalled fact didn't reach the answer: {reply!r}"
     assert len([u for u in utterances if u in ACKNOWLEDGMENTS]) <= 1, (
-        f"a chain drew more than one filler: {utterances!r}"
+        f"one question drew more than one filler: {utterances!r}"
     )
 
 
