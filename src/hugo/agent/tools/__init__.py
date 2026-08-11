@@ -29,6 +29,7 @@ from openai.types.chat import ChatCompletionToolParam
 from pydantic import BaseModel, ValidationError
 
 from hugo.config import Config
+from hugo.memory.store import MemoryStore
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +110,7 @@ def _readable(exc: ValidationError) -> str:
     return f"those arguments weren't right — {problems}."
 
 
-def build_tools(config: Config) -> list[Tool]:
+def build_tools(config: Config, memory_store: MemoryStore) -> list[Tool]:
     """Assembles the tool set from what is actually available.
 
     A missing credential disables one capability with a warning instead of
@@ -118,13 +119,23 @@ def build_tools(config: Config) -> list[Tool]:
     surfaces as a journald warning plus a spoken "I can't search right
     now" rather than a service that won't start. That is also the rule an
     unreachable MCP server needs next round.
+
+    Dependencies arrive as constructor arguments, never as a `Config`:
+    nothing below the orchestrator reads configuration, which is why the
+    store is passed in rather than opened here.
     """
     # Deferred: every tool module imports the seam from this package, so a
     # module-level import here would be a cycle.
     from hugo.agent.tools.current_time import CurrentTimeTool
+    from hugo.agent.tools.recall_facts import RecallFactsTool
+    from hugo.agent.tools.remember_fact import RememberFactTool
     from hugo.agent.tools.web_search import WebSearchTool
 
-    tools: list[Tool] = [CurrentTimeTool(config.timezone)]
+    tools: list[Tool] = [
+        CurrentTimeTool(config.timezone),
+        RememberFactTool(memory_store),
+        RecallFactsTool(memory_store, config.timezone),
+    ]
     if config.tavily_api_key:
         tools.append(WebSearchTool(config.tavily_api_key))
     else:

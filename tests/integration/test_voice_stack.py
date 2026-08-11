@@ -17,15 +17,20 @@ import json
 import math
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 import websockets
 
 from hugo.agent.llm_client import AssistantTurn, LlmClient
 from hugo.agent.tools.current_time import CurrentTimeTool
+from hugo.agent.tools.recall_facts import RecallFactsTool
+from hugo.agent.tools.remember_fact import RememberFactTool
 from hugo.agent.tools.web_search import WebSearchTool
 from hugo.config import Config
+from hugo.memory.store import MemoryStore
 
 pytestmark = pytest.mark.integration
 
@@ -199,7 +204,7 @@ async def test_a_date_question_uses_the_time_tool_and_draws_no_filler(config: Co
     llm = LlmClient(base_url=config.llm_base_url, model=config.llm_model)
     loop = ToolLoop(
         llm,
-        tools=[CurrentTimeTool(), _StubWebSearch()],
+        tools=[CurrentTimeTool(config.timezone), _StubWebSearch()],
         acknowledge_after_s=config.acknowledge_after_s,
     )
 
@@ -207,13 +212,95 @@ async def test_a_date_question_uses_the_time_tool_and_draws_no_filler(config: Co
     reply = " ".join(utterances)
     print(f"\ndate reply: {reply}")
 
-    now = datetime.now().astimezone()
+    # The configured zone, not the host's: dgx1 sits on Etc/UTC, where the
+    # weekday itself flips four hours before Halifax's does.
+    now = datetime.now(ZoneInfo(config.timezone))
     assert now.strftime("%A").lower() in reply.lower(), (
         f"reply doesn't name today's weekday — did it call get_current_time? {reply!r}"
     )
     assert str(now.day) in reply
     assert not [u for u in utterances if u in ACKNOWLEDGMENTS], (
         f"a microsecond tool drew a filler phrase: {utterances!r}"
+    )
+
+
+async def _memory_store(tmp_path: Path) -> MemoryStore:
+    """A throwaway facts DB — never the real one at ~/.local/state/hugo,
+    which is HUGO's actual memory and belongs to whoever is using the robot."""
+    store = MemoryStore(tmp_path / "memory.db")
+    await store.initialize()
+    return store
+
+
+async def test_remembering_a_fact_speaks_it_back_and_lands_in_memory(
+    config: Config, tmp_path: Path
+) -> None:
+    """The audible-write guarantee, held by a test rather than a mechanism:
+    remember_fact hands back the exact wording it committed and the model is
+    trusted to say it. Making it structural would mean tools that author their
+    own speech, which no MCP tool will ever supply."""
+    await _require_llm(config)
+    from hugo.agent.tool_loop import ToolLoop
+
+    store = await _memory_store(tmp_path)
+    llm = LlmClient(base_url=config.llm_base_url, model=config.llm_model)
+    loop = ToolLoop(
+        llm,
+        tools=[
+            RememberFactTool(store),
+            RecallFactsTool(store, config.timezone),
+            CurrentTimeTool(config.timezone),
+            _StubWebSearch(),
+        ],
+        acknowledge_after_s=config.acknowledge_after_s,
+    )
+
+    utterances = [u async for u in loop.think("Remember that my standup is at 9:30.")]
+    reply = " ".join(utterances)
+    facts = await store.all_facts()
+    print(f"\nremember reply: {reply}\nstored: {[f.content for f in facts]}")
+
+    assert facts, f"nothing was written down: {reply!r}"
+    assert "9:30" in facts[0].content, f"the saved wording lost the time: {facts[0].content!r}"
+    # What the user hears has to be what HUGO now believes — a confirmation
+    # that omits the time is how you end up correcting a fact you can't hear.
+    assert "9:30" in reply or "9.30" in reply, f"the write wasn't audible: {reply!r}"
+
+
+async def test_a_fresh_tool_loop_recalls_a_fact_across_the_restart(
+    config: Config, tmp_path: Path
+) -> None:
+    """The only thing the store is actually for. Within a conversation the
+    append-only history already answers "what time is standup" — so the fact
+    is on disk and the ToolLoop asking about it has never heard it said, which
+    is the restart case in everything but the process boundary."""
+    await _require_llm(config)
+    from hugo.agent.tool_loop import ToolLoop
+
+    store = await _memory_store(tmp_path)
+    # Written straight to the store, not through a turn: the model-driven
+    # write is the previous test's job, and separating them means a failure
+    # here says "recall didn't happen" rather than "something didn't happen".
+    await store.add_fact("The stand-up meeting is at 9:30")
+
+    llm = LlmClient(base_url=config.llm_base_url, model=config.llm_model)
+    # Fresh loop, fresh history: everything it knows now comes off disk.
+    reading = ToolLoop(
+        llm,
+        tools=[
+            RememberFactTool(store),
+            RecallFactsTool(store, config.timezone),
+            CurrentTimeTool(config.timezone),
+            _StubWebSearch(),
+        ],
+        acknowledge_after_s=config.acknowledge_after_s,
+    )
+    utterances = [u async for u in reading.think("What time did I say standup was?")]
+    reply = " ".join(utterances)
+    print(f"\nrecall reply: {reply}")
+
+    assert "9:30" in reply or "9.30" in reply, (
+        f"the fact didn't survive the restart — did it call recall_facts? {reply!r}"
     )
 
 

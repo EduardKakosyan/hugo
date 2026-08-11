@@ -297,7 +297,7 @@ async def run(config: Config) -> None:
         # Missing credentials cost a capability, not a startup (ADR 0006):
         # a tool that can't be built is left out of the set, and its schema
         # never reaches the model.
-        tools = build_tools(config)
+        tools = build_tools(config, memory_store)
 
         # First-inference warmup: the first live turn paid 12.77s to first
         # audio vs ~3.5s warm (dgx1, 2026-07-23) — cold CUDA paths and an
