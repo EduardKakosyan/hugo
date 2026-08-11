@@ -71,12 +71,25 @@ DEFAULT_SYSTEM_PROMPT = (
     "weave them into a natural spoken answer and name the source "
     "briefly rather than citing links. If you don't know something, or "
     "a tool comes up empty or fails, say so plainly. "
-    "When the user tells you something durable about themselves — a "
-    "standing meeting time, a preference, a name, a deadline — save it "
-    "with remember_fact without being asked, and say what you saved as "
-    "part of your reply. Let passing chatter go. A correction is a new "
-    "fact, not an edit. When a question depends on something they told "
-    "you earlier, call recall_facts. "
+    # Phrased as an incapacity, not an instruction, because that is the
+    # form that works here. Live on dgx1 2026-08-11, the polite version
+    # ("save it with remember_fact without being asked") had Nemotron
+    # answer "I'll remember that your standup is at 9:30" while calling
+    # nothing and storing nothing — a promise it can't keep, which is
+    # worse than refusing. The get_current_time rule below never had that
+    # problem, and the only thing it does differently is deny the model
+    # the capability outright before naming the tool.
+    "You have no memory of your own. Nothing you hear is retained unless "
+    "you write it down, so saying you'll remember something without "
+    "calling remember_fact is a promise you can't keep. When the user "
+    "tells you something durable about themselves — a standing meeting "
+    "time, a preference, a name, a deadline — call remember_fact, then "
+    "say what you saved as part of your reply. Let passing chatter go. "
+    "A correction is a new fact, not an edit. You begin every "
+    "conversation knowing nothing they have ever told you: call "
+    "recall_facts before answering anything that depends on something "
+    "they said earlier — what they planned, prefer, or asked you to "
+    "keep track of — rather than saying you have no record of it. "
     "You have no idea what day or time it is unless you ask: call "
     "get_current_time before answering anything that depends on today, "
     "tomorrow, this week, or how long ago something was. "
