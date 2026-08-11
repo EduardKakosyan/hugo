@@ -18,10 +18,23 @@ lives in the voice loop (gap-based, so it also covers a slow LLM pass), not
 here — a generator can't emit on a timer while it's blocked inside a tool
 await.
 
+A failure a tool marks `retryable` (ToolFailure.retryable) gets up to
+`_MAX_TOOL_ATTEMPTS` attempts, with a spoken line between them — the same
+generator that races the filler owns the retry, because narrating an
+attempt has to be a `yield` and only the turn loop can yield. Retries are
+per call, never per batch: a turn that remembers a fact and searches the
+web must not re-run the successful write because the search timed out.
+
 Errors degrade to a spoken apology rather than propagating: the Thinker is
 the system boundary isolating the voice loop from network/model/parsing
 failures (the original incident: a real 400 from vLLM silently killed the
 voice loop's task).
+
+Barge-in can also cancel a turn mid-tool, leaving history holding an
+assistant `tool_calls` message with no reply — nothing downstream rejects
+that (vLLM never cross-references `tool_call_id`), but the next turn's
+history needs it healed anyway, so `think()` repairs the tail before
+appending the next user message (research §3).
 """
 
 import asyncio
@@ -29,6 +42,7 @@ import json
 import logging
 import re
 from collections.abc import AsyncIterator, Callable, Sequence
+from typing import Any, cast
 
 from openai.types.chat import ChatCompletionMessageParam, ChatCompletionToolParam
 
@@ -82,6 +96,13 @@ _MOOD_TAG = re.compile(r"\[(" + "|".join(MOODS) + r")\]\s*", re.IGNORECASE)
 
 _MAX_TOOL_ITERATIONS = 4
 
+# Attempts at ONE call, not passes through the LLM (_MAX_TOOL_ITERATIONS
+# above) — a different budget for a different thing. The two multiply in
+# the worst case (12 invocations), which is acceptable because only a
+# failure the tool marks retryable consumes an attempt, and in-tool retries
+# are cheap where the LLM pass is the expensive resource.
+_MAX_TOOL_ATTEMPTS = 3
+
 _BULLET_PREFIX = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+", re.MULTILINE)
 _MARKDOWN_TOKENS = re.compile(r"[*_#`]+")
 
@@ -95,6 +116,31 @@ ACKNOWLEDGMENTS = (
     "Just a second.",
     "Give me a moment on that.",
 )
+
+# Spoken once BETWEEN attempts of the same call, and only when another
+# attempt is actually coming next — not after the last one, which goes
+# straight to the failure text a model can act on (a different tool, or
+# different arguments, within its own _MAX_TOOL_ITERATIONS budget).
+RETRY_NOTICE = "That didn't go through, let me try again."
+
+# The _MAX_TOOL_ITERATIONS pass budget ran out without a final answer.
+# Tool-neutral on purpose: this line used to say "completing that search"
+# from when web search was the only tool HUGO had — wrong for three of
+# the four tools in the set now, and for whatever MCP adds next round.
+EXHAUSTED_FALLBACK = "Sorry, I'm having trouble completing that right now."
+
+
+def _field(message: ChatCompletionMessageParam, key: str) -> Any:
+    """Reads one key off a history entry regardless of which of the six
+    `ChatCompletionMessageParam` roles it turns out to be.
+
+    Only assistant messages carry `tool_calls`; only tool messages carry
+    `tool_call_id`. mypy checks a Union of TypedDicts key-by-key, so asking
+    for either on the wrong role is a static error even though these are
+    plain dicts at runtime — the same escape hatch `as_message_param`
+    already uses when it builds one.
+    """
+    return cast(dict[str, Any], message).get(key)
 
 
 def speechify(text: str) -> str:
@@ -175,6 +221,7 @@ class ToolLoop:
 
     async def think(self, user_text: str) -> AsyncIterator[str]:
         """Yields utterances to speak, in order, while the turn runs."""
+        self._repair_orphaned_tool_calls()
         self._history.append({"role": "user", "content": user_text})
         try:
             async for utterance in self._respond():
@@ -182,6 +229,57 @@ class ToolLoop:
         except Exception:
             logger.exception("thinker failed mid-response")
             yield "Sorry, I ran into a problem thinking about that."
+
+    def _repair_orphaned_tool_calls(self) -> None:
+        """Heals a turn barge-in cut short inside a tool `await`.
+
+        Cancellation lands wherever the generator happens to be, which can
+        be mid-dispatch: the assistant's `tool_calls` message is already in
+        history, but the call running when the cancellation hit — and every
+        call after it — never got its `role: tool` reply appended. Nothing
+        downstream rejects that: the chat template renders the tool_calls
+        branch unconditionally and vLLM never cross-references
+        `tool_call_id` against the replies that follow (research §3), so a
+        ragged history is silently tolerated right up until it confuses the
+        model on the next pass.
+
+        Runs at the top of every think(), before a cancellation handler
+        could exist for it, so it heals history left ragged by any cause —
+        not just barge-in — on a plain synchronous path.
+        """
+        history = self._history
+        last_assistant = next(
+            (
+                i
+                for i in range(len(history) - 1, -1, -1)
+                if _field(history[i], "role") == "assistant"
+            ),
+            None,
+        )
+        if last_assistant is None:
+            return
+        tool_calls = _field(history[last_assistant], "tool_calls")
+        if not tool_calls:
+            return
+        answered = {
+            _field(message, "tool_call_id")
+            for message in history[last_assistant + 1 :]
+            if _field(message, "role") == "tool"
+        }
+        for call in tool_calls:
+            if call["id"] in answered:
+                continue
+            # A statement of fact, not a failure report: the tool may well
+            # have succeeded (a fact written, a search returned) — telling
+            # the model it *failed* would have HUGO apologising over a
+            # write that actually landed.
+            history.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "content": "interrupted by the user before this finished",
+                }
+            )
 
     async def _respond(self) -> AsyncIterator[str]:
         # Per turn, not per pass: a chain of tools (the date, then the
@@ -215,31 +313,41 @@ class ToolLoop:
             # acknowledgment, so it suppresses the canned one.
             acknowledged = acknowledged or spoke_any
             for call in turn.tool_calls:
-                task = asyncio.create_task(self._invoke(call))
-                try:
-                    # Race the tool rather than predicting its latency: the
-                    # phrase is only worth saying if the wait is real, and
-                    # no per-tool "is this slow?" metadata could know that
-                    # for an MCP tool nobody has timed.
-                    await asyncio.wait([task], timeout=self._acknowledge_after_s)
-                    if not task.done() and not acknowledged:
-                        acknowledged = True
-                        yield self._next_acknowledgment()
-                    result = await task
-                    content = result.text if isinstance(result, ToolFailure) else result
-                    self._history.append(
-                        {"role": "tool", "tool_call_id": call.id, "content": content}
-                    )
-                finally:
-                    # Barge-in cancels this generator wherever it happens to
-                    # be, which can be either await above; carry the
-                    # cancellation into the tool the way a plain `await`
-                    # used to, rather than orphaning a task nobody collects.
-                    # A no-op once the task is done.
-                    task.cancel()
+                result: str | ToolFailure = ""
+                # Attempts happen per CALL, never per batch: a turn that
+                # remembers a fact and searches the web must not re-run the
+                # successful write because the search timed out.
+                for attempt in range(_MAX_TOOL_ATTEMPTS):
+                    task = asyncio.create_task(self._invoke(call))
+                    try:
+                        # Race the tool rather than predicting its latency: the
+                        # phrase is only worth saying if the wait is real, and
+                        # no per-tool "is this slow?" metadata could know that
+                        # for an MCP tool nobody has timed.
+                        await asyncio.wait([task], timeout=self._acknowledge_after_s)
+                        if not task.done() and not acknowledged:
+                            acknowledged = True
+                            yield self._next_acknowledgment()
+                        result = await task
+                    finally:
+                        # Barge-in cancels this generator wherever it happens to
+                        # be, which can be either await above; carry the
+                        # cancellation into the tool the way a plain `await`
+                        # used to, rather than orphaning a task nobody collects.
+                        # A no-op once the task is done.
+                        task.cancel()
+                    if not (isinstance(result, ToolFailure) and result.retryable):
+                        break
+                    # Only narrate if another attempt is actually coming —
+                    # the last attempt's failure goes straight to history
+                    # for the model to read and act on instead.
+                    if attempt + 1 < _MAX_TOOL_ATTEMPTS:
+                        yield RETRY_NOTICE
+                content = result.text if isinstance(result, ToolFailure) else result
+                self._history.append({"role": "tool", "tool_call_id": call.id, "content": content})
 
         logger.warning("hit _MAX_TOOL_ITERATIONS without a final answer")
-        yield "Sorry, I'm having trouble completing that search right now."
+        yield EXHAUSTED_FALLBACK
 
     def _next_acknowledgment(self) -> str:
         acknowledgment = ACKNOWLEDGMENTS[self._acknowledgment_count % len(ACKNOWLEDGMENTS)]

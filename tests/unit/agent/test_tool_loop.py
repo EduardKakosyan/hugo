@@ -11,6 +11,7 @@ from hugo.agent.llm_client import AssistantTurn, ToolCallRequest
 from hugo.agent.tool_loop import (
     ACKNOWLEDGMENTS,
     DEFAULT_SYSTEM_PROMPT,
+    RETRY_NOTICE,
     SentenceStream,
     ToolLoop,
     speechify,
@@ -52,13 +53,18 @@ class _FakeTool:
     """Satisfies the Tool Protocol structurally — no subclassing, the same
     convention as tests/unit/voice/fakes.py. Records the argument dicts it
     was invoked with, and `delay` scripts latency so the acknowledgment race
-    is deterministic (as FakeThinker.delay_before_each does for the nudge)."""
+    is deterministic (as FakeThinker.delay_before_each does for the nudge).
+    `calls_before_success` scripts a retry: the first N calls return a
+    retryable ToolFailure and only the (N+1)th returns `result`, so a test
+    can pin what the loop does on its second or third attempt without a
+    real failing dependency."""
 
     def __init__(
         self,
         name: str = "web_search",
         result: str | ToolFailure = "search result",
         delay: float = 0.0,
+        calls_before_success: int = 0,
     ) -> None:
         self.schema: ChatCompletionToolParam = {
             "type": "function",
@@ -69,13 +75,21 @@ class _FakeTool:
             },
         }
         self.calls: list[dict[str, Any]] = []
+        # Set the moment invoke() is entered, so a test can cancel a turn at
+        # the one instant it means to — inside the tool await — without
+        # racing a sleep against the scheduler.
+        self.invoked = asyncio.Event()
         self._result = result
         self._delay = delay
+        self._calls_before_success = calls_before_success
 
     async def invoke(self, arguments: dict[str, Any]) -> str | ToolFailure:
         self.calls.append(arguments)
+        self.invoked.set()
         if self._delay:
             await asyncio.sleep(self._delay)
+        if len(self.calls) <= self._calls_before_success:
+            return ToolFailure("that didn't go through.", retryable=True)
         return self._result
 
 
@@ -339,6 +353,226 @@ async def test_falls_back_after_max_tool_iterations() -> None:
     utterances = await _think_all(loop, "loop forever")
 
     assert "trouble" in utterances[-1].lower()
+
+
+async def test_a_retryable_failure_draws_a_notice_and_the_retry_succeeds() -> None:
+    """A failure the tool marks retryable gets a second attempt, narrated in
+    between — and it's the SECOND attempt's result that reaches history."""
+    call = ToolCallRequest(id="call_1", name="web_search", arguments='{"query": "weather"}')
+    llm = _FakeStreamingLlm(
+        [
+            ([], _turn(calls=[call])),
+            (["It's sunny."], _turn("It's sunny.")),
+        ]
+    )
+    tool = _FakeTool(result="sunny today", calls_before_success=1)
+    loop = ToolLoop(llm, tools=[tool])
+
+    utterances = await _think_all(loop, "what's the weather")
+
+    assert RETRY_NOTICE in utterances
+    assert len(tool.calls) == 2
+    tool_message = next(m for m in llm.seen_messages[1] if m.get("role") == "tool")
+    assert tool_message["content"] == "sunny today"
+
+
+async def test_a_terminal_failure_gets_no_notice_and_only_one_attempt() -> None:
+    """`retryable=False` means a second attempt can't go differently, so the
+    loop doesn't spend one: no RETRY_NOTICE, one call, and the failure text
+    itself is what the model reads."""
+    call = ToolCallRequest(id="call_1", name="web_search", arguments='{"query": "weather"}')
+    llm = _FakeStreamingLlm(
+        [
+            ([], _turn(calls=[call])),
+            (["I couldn't reach search."], _turn("I couldn't reach search.")),
+        ]
+    )
+    failure = ToolFailure("the credentials were rejected.", retryable=False)
+    tool = _FakeTool(result=failure)
+    loop = ToolLoop(llm, tools=[tool])
+
+    utterances = await _think_all(loop, "what's the weather")
+
+    assert RETRY_NOTICE not in utterances
+    assert len(tool.calls) == 1
+    tool_message = next(m for m in llm.seen_messages[1] if m.get("role") == "tool")
+    assert tool_message["content"] == failure.text
+
+
+async def test_unknown_tool_failure_is_not_retried() -> None:
+    """The loop's own "no such tool" failure is retryable=False (never a
+    different outcome on a second try), so it costs exactly one pass through
+    the attempt loop and the turn continues as normal."""
+    call = ToolCallRequest(id="call_1", name="teleport", arguments="{}")
+    llm = _FakeStreamingLlm(
+        [
+            ([], _turn(calls=[call])),
+            (["Can't do that."], _turn("Can't do that.")),
+        ]
+    )
+    loop = ToolLoop(llm, tools=[])
+
+    utterances = await _think_all(loop, "teleport me")
+
+    assert RETRY_NOTICE not in utterances
+    assert utterances[-1] == "Can't do that."
+    tool_messages = [m for m in llm.seen_messages[1] if m.get("role") == "tool"]
+    assert len(tool_messages) == 1
+    assert "no tool called teleport" in tool_messages[0]["content"]
+
+
+async def test_malformed_arguments_are_not_retried() -> None:
+    """vLLM's unconstrained tool_choice="auto" path means arguments really
+    can be broken JSON (research §1). That failure is the loop's own, is
+    retryable=False, and the tool it was meant for is never even invoked."""
+    call = ToolCallRequest(id="call_1", name="web_search", arguments='{"query": ')
+    llm = _FakeStreamingLlm(
+        [
+            ([], _turn(calls=[call])),
+            (["Let me try again differently."], _turn("Let me try again differently.")),
+        ]
+    )
+    web_search = _FakeTool()
+    loop = ToolLoop(llm, tools=[web_search])
+
+    utterances = await _think_all(loop, "what's the weather")
+
+    assert RETRY_NOTICE not in utterances
+    assert web_search.calls == []
+
+
+async def test_retries_still_draw_only_one_acknowledgment() -> None:
+    """The acknowledgment flag is per turn, not per attempt: two failing
+    attempts of the same slow call still draw the canned filler exactly
+    once, alongside two retry notices (never after the last attempt)."""
+    call = ToolCallRequest(id="call_1", name="web_search", arguments='{"query": "weather"}')
+    llm = _FakeStreamingLlm(
+        [
+            ([], _turn(calls=[call])),
+            (["It's sunny."], _turn("It's sunny.")),
+        ]
+    )
+    tool = _FakeTool(result="sunny today", delay=_SLOWER_THAN_THE_RACE_S, calls_before_success=2)
+    loop = ToolLoop(llm, tools=[tool], acknowledge_after_s=_ACK_AFTER_S)
+
+    utterances = await _think_all(loop, "what's the weather")
+
+    assert len(_acknowledgments(utterances)) == 1
+    assert utterances.count(RETRY_NOTICE) == 2
+    assert len(tool.calls) == 3
+    assert utterances[-1] == "It's sunny."
+
+
+async def test_orphaned_tool_call_is_repaired_before_the_next_user_message() -> None:
+    """Barge-in can cancel the generator inside a tool await, leaving an
+    assistant tool_calls message with no reply. No test cancels a turn
+    mid-dispatch to produce this (research §3) — the repair is proven
+    directly at the ragged history it operates on, per the outline's own
+    note on that gap."""
+    llm = _FakeStreamingLlm([(["Got it."], _turn("Got it."))])
+    loop = ToolLoop(llm, tools=[_FakeTool()])
+    loop._history.append(
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call_7",
+                    "type": "function",
+                    "function": {"name": "web_search", "arguments": "{}"},
+                }
+            ],
+        }
+    )
+
+    await _think_all(loop, "what time is standup")
+
+    sent = llm.seen_messages[0]
+    assert sent[2] == {
+        "role": "tool",
+        "tool_call_id": "call_7",
+        "content": "interrupted by the user before this finished",
+    }
+    assert sent[3] == {"role": "user", "content": "what time is standup"}
+
+
+async def test_repair_only_fills_the_reply_still_missing() -> None:
+    """A two-call turn interrupted between calls: call_1 already has its
+    reply, call_2 doesn't. Repair must not duplicate call_1's and every
+    tool_call id on the orphaned assistant message ends up answered."""
+    llm = _FakeStreamingLlm([(["ok."], _turn("ok."))])
+    loop = ToolLoop(llm, tools=[_FakeTool()])
+    loop._history.append(
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_current_time", "arguments": "{}"},
+                },
+                {
+                    "id": "call_2",
+                    "type": "function",
+                    "function": {"name": "web_search", "arguments": "{}"},
+                },
+            ],
+        }
+    )
+    loop._history.append({"role": "tool", "tool_call_id": "call_1", "content": "Sunday"})
+
+    await _think_all(loop, "next question")
+
+    tool_messages = [m for m in loop._history if m.get("role") == "tool"]
+    assert {m["tool_call_id"] for m in tool_messages} == {"call_1", "call_2"}
+    assert tool_messages[0]["content"] == "Sunday"
+    assert tool_messages[1]["content"] == "interrupted by the user before this finished"
+
+
+async def test_a_turn_cancelled_inside_a_tool_leaves_history_the_repair_expects() -> None:
+    """Closes the loop between the two tests above and the thing they stand
+    in for. Both construct the ragged history by hand, so they would keep
+    passing if a real barge-in started leaving it ragged some OTHER way —
+    the repair would then be healing a shape that no longer occurs. Here
+    the cancellation is real: the turn is consumed in a task and cancelled
+    while the tool is still inside its await, which is where barge-in lands
+    it in production (voice/loop.py cancels the task draining think()).
+
+    The assertion before the repair is the point — history really does end
+    on an unanswered assistant tool_calls message — and the turn after it
+    proves the same instance recovers."""
+    call = ToolCallRequest(id="call_9", name="web_search", arguments='{"query": "weather"}')
+    llm = _FakeStreamingLlm(
+        [
+            ([], _turn(calls=[call])),
+            (["It's sunny."], _turn("It's sunny.")),
+        ]
+    )
+    # Long enough that the cancellation lands mid-await rather than racing
+    # the tool's completion; the test never waits it out.
+    tool = _FakeTool(delay=10.0)
+    loop = ToolLoop(llm, tools=[tool], acknowledge_after_s=_ACK_AFTER_S)
+
+    turn = asyncio.create_task(_think_all(loop, "what's the weather"))
+    await tool.invoked.wait()
+    turn.cancel()
+    try:
+        await turn
+    except asyncio.CancelledError:
+        pass
+
+    assert loop._history[-1]["role"] == "assistant"
+    assert loop._history[-1]["tool_calls"][0]["id"] == "call_9"
+
+    utterances = await _think_all(loop, "never mind, what's the time")
+
+    sent = llm.seen_messages[-1]
+    assert sent[-2] == {
+        "role": "tool",
+        "tool_call_id": "call_9",
+        "content": "interrupted by the user before this finished",
+    }
+    assert sent[-1] == {"role": "user", "content": "never mind, what's the time"}
+    assert utterances[-1] == "It's sunny."
 
 
 async def test_llm_failure_degrades_to_a_spoken_apology() -> None:
