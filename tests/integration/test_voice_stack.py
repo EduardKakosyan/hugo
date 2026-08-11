@@ -16,7 +16,7 @@ import asyncio
 import json
 import math
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -326,9 +326,18 @@ async def test_a_two_tool_chain_runs_both_tools_and_draws_at_most_one_filler(
     config: Config, tmp_path: Path
 ) -> None:
     """The behaviour that only exists once all four tools are present: a
-    question whose answer needs today's date AND something said earlier, so
-    the model has to chain get_current_time into recall_facts rather than
-    picking one schema and stopping.
+    question neither tool can answer alone, so the model has to chain
+    get_current_time into recall_facts rather than picking one schema and
+    stopping.
+
+    The question is a countdown for a reason. The obvious phrasing — "what
+    did I say I'd do today" — turned out NOT to be a two-tool question
+    (dgx1, 2026-08-11): the stored fact already says "today", so the model
+    answered it correctly from recall_facts alone and was right to skip the
+    clock. Demanding the second call there would have tested its
+    willingness to make a redundant one. A countdown needs the appointment
+    from memory AND the current date to subtract from, and the stored date
+    is computed from today so the test can't rot into the past.
 
     The filler assertion rides along on the same turn deliberately. "At most
     one, however many tools run" is a claim about a whole turn, and a
@@ -338,7 +347,8 @@ async def test_a_two_tool_chain_runs_both_tools_and_draws_at_most_one_filler(
     from hugo.agent.tool_loop import ACKNOWLEDGMENTS, EXHAUSTED_FALLBACK, ToolLoop
 
     store = await _memory_store(tmp_path)
-    await store.add_fact("I said I'd finish the quarterly report today")
+    appointment = datetime.now(ZoneInfo(config.timezone)) + timedelta(days=9)
+    await store.add_fact(f"My dentist appointment is on {appointment:%-d %B}")
 
     llm = LlmClient(base_url=config.llm_base_url, model=config.llm_model)
     loop = ToolLoop(
@@ -347,18 +357,21 @@ async def test_a_two_tool_chain_runs_both_tools_and_draws_at_most_one_filler(
         acknowledge_after_s=config.acknowledge_after_s,
     )
 
-    utterances = [u async for u in loop.think("What did I say I'd do today?")]
+    utterances = [u async for u in loop.think("How many days until my dentist appointment?")]
     reply = " ".join(utterances)
     called = _tools_called(loop)
     print(f"\nchain reply: {reply}\ntools called: {called}")
 
     assert "recall_facts" in called, f"never consulted its notes: {called}"
-    assert "get_current_time" in called, f"answered a 'today' question blind: {called}"
+    assert "get_current_time" in called, f"counted down from an unknown today: {called}"
     # Ran out of LLM passes instead of answering — the failure mode a chain
     # is most likely to hit, and one an assertion on the reply text alone
     # would read as a merely disappointing answer.
     assert EXHAUSTED_FALLBACK not in utterances, f"chain exhausted its passes: {utterances!r}"
-    assert "report" in reply.lower(), f"the recalled fact didn't reach the answer: {reply!r}"
+    # Deliberately not asserting the arithmetic: whether the model lands on
+    # exactly nine is a property of the model, not of the tool set this
+    # test exists to prove, and pinning it would make the suite flaky on a
+    # reply like "a bit over a week".
     assert len([u for u in utterances if u in ACKNOWLEDGMENTS]) <= 1, (
         f"a chain drew more than one filler: {utterances!r}"
     )
