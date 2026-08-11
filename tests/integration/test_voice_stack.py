@@ -232,6 +232,22 @@ async def _memory_store(tmp_path: Path) -> MemoryStore:
     return store
 
 
+def _full_tool_set(config: Config, store: MemoryStore) -> list[Any]:
+    """All four schemas, exactly as build_tools() assembles them for a live
+    start — web search stubbed, since Tavily isn't what's under test.
+
+    The count is the point rather than the members: every test below is
+    asking what the model does when it has to pick one schema out of four,
+    so they must all be choosing against the same set. Mirror build_tools()
+    here when a tool joins it."""
+    return [
+        RememberFactTool(store),
+        RecallFactsTool(store, config.timezone),
+        CurrentTimeTool(config.timezone),
+        _StubWebSearch(),
+    ]
+
+
 async def test_remembering_a_fact_speaks_it_back_and_lands_in_memory(
     config: Config, tmp_path: Path
 ) -> None:
@@ -246,12 +262,7 @@ async def test_remembering_a_fact_speaks_it_back_and_lands_in_memory(
     llm = LlmClient(base_url=config.llm_base_url, model=config.llm_model)
     loop = ToolLoop(
         llm,
-        tools=[
-            RememberFactTool(store),
-            RecallFactsTool(store, config.timezone),
-            CurrentTimeTool(config.timezone),
-            _StubWebSearch(),
-        ],
+        tools=_full_tool_set(config, store),
         acknowledge_after_s=config.acknowledge_after_s,
     )
 
@@ -287,12 +298,7 @@ async def test_a_fresh_tool_loop_recalls_a_fact_across_the_restart(
     # Fresh loop, fresh history: everything it knows now comes off disk.
     reading = ToolLoop(
         llm,
-        tools=[
-            RememberFactTool(store),
-            RecallFactsTool(store, config.timezone),
-            CurrentTimeTool(config.timezone),
-            _StubWebSearch(),
-        ],
+        tools=_full_tool_set(config, store),
         acknowledge_after_s=config.acknowledge_after_s,
     )
     utterances = [u async for u in reading.think("What time did I say standup was?")]
@@ -301,6 +307,103 @@ async def test_a_fresh_tool_loop_recalls_a_fact_across_the_restart(
 
     assert "9:30" in reply or "9.30" in reply, (
         f"the fact didn't survive the restart — did it call recall_facts? {reply!r}"
+    )
+
+
+def _tools_called(loop: Any) -> list[str]:
+    """Every tool name the model actually invoked this turn, read back off
+    the loop's own history — the record the next LLM pass sees, so it can't
+    drift from what really ran the way a test-side spy could."""
+    return [
+        call["function"]["name"]
+        for message in loop._history
+        if message.get("role") == "assistant"
+        for call in message.get("tool_calls") or []
+    ]
+
+
+async def test_a_two_tool_chain_runs_both_tools_and_draws_at_most_one_filler(
+    config: Config, tmp_path: Path
+) -> None:
+    """The behaviour that only exists once all four tools are present: a
+    question whose answer needs today's date AND something said earlier, so
+    the model has to chain get_current_time into recall_facts rather than
+    picking one schema and stopping.
+
+    The filler assertion rides along on the same turn deliberately. "At most
+    one, however many tools run" is a claim about a whole turn, and a
+    two-tool chain is the shortest turn that can actually break it — the
+    unit tests script the chain, this one lets the model build it."""
+    await _require_llm(config)
+    from hugo.agent.tool_loop import ACKNOWLEDGMENTS, EXHAUSTED_FALLBACK, ToolLoop
+
+    store = await _memory_store(tmp_path)
+    await store.add_fact("I said I'd finish the quarterly report today")
+
+    llm = LlmClient(base_url=config.llm_base_url, model=config.llm_model)
+    loop = ToolLoop(
+        llm,
+        tools=_full_tool_set(config, store),
+        acknowledge_after_s=config.acknowledge_after_s,
+    )
+
+    utterances = [u async for u in loop.think("What did I say I'd do today?")]
+    reply = " ".join(utterances)
+    called = _tools_called(loop)
+    print(f"\nchain reply: {reply}\ntools called: {called}")
+
+    assert "recall_facts" in called, f"never consulted its notes: {called}"
+    assert "get_current_time" in called, f"answered a 'today' question blind: {called}"
+    # Ran out of LLM passes instead of answering — the failure mode a chain
+    # is most likely to hit, and one an assertion on the reply text alone
+    # would read as a merely disappointing answer.
+    assert EXHAUSTED_FALLBACK not in utterances, f"chain exhausted its passes: {utterances!r}"
+    assert "report" in reply.lower(), f"the recalled fact didn't reach the answer: {reply!r}"
+    assert len([u for u in utterances if u in ACKNOWLEDGMENTS]) <= 1, (
+        f"a chain drew more than one filler: {utterances!r}"
+    )
+
+
+async def test_first_utterance_on_a_tool_using_turn_beats_the_progress_nudge(
+    config: Config, tmp_path: Path
+) -> None:
+    """The PRD's latency bar, measured on the turn shape most likely to miss
+    it. The budget is config.progress_update_after_s rather than a literal:
+    staying under it is precisely the claim that a tool turn never needs the
+    voice loop's "still working on it" nudge, so if that value moves this
+    test should move with it.
+
+    Measured to the FIRST utterance, not the last: what the user waits on is
+    HUGO starting to talk, and the acknowledgment counts — it is the turn
+    admitting it heard them, which is what the race exists to deliver."""
+    await _require_llm(config)
+    from hugo.agent.tool_loop import ToolLoop
+
+    store = await _memory_store(tmp_path)
+    llm = LlmClient(base_url=config.llm_base_url, model=config.llm_model)
+    loop = ToolLoop(
+        llm,
+        tools=_full_tool_set(config, store),
+        acknowledge_after_s=config.acknowledge_after_s,
+    )
+
+    started = time.monotonic()
+    first_utterance_at: float | None = None
+    utterances: list[str] = []
+    async for utterance in loop.think("What's the weather in Halifax?"):
+        if first_utterance_at is None:
+            first_utterance_at = time.monotonic() - started
+        utterances.append(utterance)
+    total_s = time.monotonic() - started
+    print(
+        f"\ntool turn: {first_utterance_at:.2f}s to first utterance, "
+        f"{total_s:.2f}s total, tools: {_tools_called(loop)}"
+    )
+
+    assert first_utterance_at is not None, "the turn said nothing at all"
+    assert first_utterance_at < config.progress_update_after_s, (
+        f"a tool turn took {first_utterance_at:.2f}s to speak, past the "
+        f"{config.progress_update_after_s}s nudge"
     )
 
 
