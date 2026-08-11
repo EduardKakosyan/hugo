@@ -37,13 +37,25 @@ class RememberFactArgs(BaseModel):
 
 
 class RememberFactTool:
+    # The description carries the "you have no other memory" framing as
+    # well as the system prompt, because at TEMPERATURE 1.0 the prompt
+    # alone did not hold: measured on dgx1 2026-08-11, "Remember that my
+    # standup is at 9:30" produced a bare "I'll remember that" on 3 runs
+    # in 5. The schema is the text nearest the decision the model is
+    # actually sampling, and "never say you'll remember without calling
+    # this" names the exact wrong completion rather than describing the
+    # right one.
     schema = schema_from(
         "remember_fact",
         "Save something durable the user told you about themselves -- a "
         "standing meeting time, a preference, a name, a deadline -- so you "
-        "still know it after a restart. Use it without being asked, and let "
-        "passing chatter go. To correct an earlier fact, save the new "
-        "version; nothing needs deleting.",
+        "still know it after a restart. This is your ONLY memory: a fact "
+        "you don't save here is gone the moment this conversation ends, so "
+        "never reply that you'll remember something without calling this "
+        "first -- that is a promise you cannot keep. Call it whenever the "
+        "user asks you to remember something, and unasked when something "
+        "durable comes up. Let passing chatter go. To correct an earlier "
+        "fact, save the new version; nothing needs deleting.",
         RememberFactArgs,
     )
 

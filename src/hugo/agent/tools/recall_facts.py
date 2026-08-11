@@ -52,12 +52,20 @@ class RecallFactsArgs(BaseModel):
 
 
 class RecallFactsTool:
+    # Same framing as remember_fact's, for the same measured reason: the
+    # failure was "I don't have any record of what you said you'd do
+    # today" — a confident denial from a model that never looked. Naming
+    # that sentence as the thing not to say beats describing the tool.
     schema = schema_from(
         "recall_facts",
         "Look up what the user told you about themselves in earlier "
-        "conversations. Call this whenever a question depends on something "
-        "they said before -- a meeting time, a preference, a name, a plan -- "
-        "rather than guessing or saying you don't know.",
+        "conversations. Your conversation history holds nothing from "
+        "before this session, so anything they told you previously is only "
+        "here. Call this whenever a question depends on something they "
+        "said before -- a meeting time, a preference, a name, a plan, a "
+        "date to count from -- rather than guessing. Never tell them you "
+        "have no record of something without checking here first; "
+        "searching costs nothing and an empty query lists everything.",
         RecallFactsArgs,
     )
 
