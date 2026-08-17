@@ -73,6 +73,7 @@ from hugo.robot.audio_io import RobotAudioIO
 from hugo.robot.motion_io import MotionCue
 from hugo.voice.broadcaster import FrameBroadcaster
 from hugo.voice.chime import conversation_end_chime_pcm16, wake_chime_pcm16
+from hugo.voice.levels import SILENCE_DBFS, peak_dbfs
 from hugo.voice.resample import StreamingPcm16Resampler
 from hugo.voice.stt import Transcript
 from hugo.voice.turn import Turn
@@ -192,6 +193,16 @@ class VoiceLoop:
         self._end_of_speech_at: float | None = None
         self._transcript_at: float | None = None
         self._first_audio_at: float | None = None
+        # Per-turn capture instrumentation. The awake path logged wake-word
+        # scores but never levels, so "HUGO couldn't hear me" was
+        # unattributable after the fact — a quiet capture path and a model
+        # that just didn't fire looked identical in the journal.
+        # _capture_peak_dbfs is the peak over the CURRENT listening window
+        # (reset per window); _peak_wake_score is the peak since this
+        # conversation began at IDLE, so it records the score the wake word
+        # actually fired at, and any louder barge-in attempt after it.
+        self._capture_peak_dbfs = SILENCE_DBFS
+        self._peak_wake_score = 0.0
 
     async def run(self) -> None:
         await self._robot.start_recording()
@@ -309,6 +320,9 @@ class VoiceLoop:
 
     async def _run_idle(self, broadcaster: FrameBroadcaster) -> None:
         self._wake_word.reset()
+        # A new conversation starts here, so the per-conversation wake-score
+        # peak reported on the turn timing line starts here too.
+        self._peak_wake_score = 0.0
         frame_count = 0
         async for frame in broadcaster.subscribe():
             frame_count += 1
@@ -318,7 +332,9 @@ class VoiceLoop:
                     frame_count,
                     self._wake_word.last_score,
                 )
-            if self._wake_word.feed(frame):
+            fired = self._wake_word.feed(frame)
+            self._peak_wake_score = max(self._peak_wake_score, self._wake_word.last_score)
+            if fired:
                 logger.info("wake word detected after %d frames", frame_count)
                 return
 
@@ -327,6 +343,9 @@ class VoiceLoop:
         within the window (initial wake: no_speech_timeout_s; follow-up
         window after a reply: follow_up_window_s — CONTEXT.md)."""
         self._vad.reset()
+        # Peak level is per listening window: the question it answers is
+        # "was the mic hearing anything while THIS window was open".
+        self._capture_peak_dbfs = SILENCE_DBFS
         window_s = (
             self._follow_up_window_s if self._listening_is_follow_up else self._no_speech_timeout_s
         )
@@ -347,6 +366,10 @@ class VoiceLoop:
 
         async def feed_audio_until_speech_ends() -> None:
             async for frame in mic:
+                # Metered before the VAD gate, so a window that never trips
+                # speech detection still reports how loud the room was —
+                # that is exactly the failure this measurement is for.
+                self._capture_peak_dbfs = peak_dbfs(frame, self._capture_peak_dbfs)
                 if not speech_started.is_set():
                     pre_roll.append(frame)
                     if self._vad.feed(frame) == "speech_start":
@@ -371,9 +394,10 @@ class VoiceLoop:
                     await speech_started.wait()
             except TimeoutError:
                 logger.info(
-                    "no speech within %.1fs (%s window)",
+                    "no speech within %.1fs (%s window), capture peak %.0f dBFS",
                     window_s,
                     "follow-up" if self._listening_is_follow_up else "initial",
+                    self._capture_peak_dbfs,
                 )
                 return None
 
@@ -444,6 +468,7 @@ class VoiceLoop:
             async for frame in mic:
                 fired = self._wake_word.feed(frame)
                 peak_score = max(peak_score, self._wake_word.last_score)
+                self._peak_wake_score = max(self._peak_wake_score, self._wake_word.last_score)
                 frame_count += 1
                 if frame_count % 200 == 0:  # ~2s of ~10ms frames
                     logger.info("RESPONDING: peak wake score %.3f over last ~2s", peak_score)
@@ -511,10 +536,18 @@ class VoiceLoop:
             self._cue("speaking")
             if self._end_of_speech_at is not None:
                 transcript_s = (self._transcript_at or now) - self._end_of_speech_at
+                # One greppable line per turn: latency AND how loud the
+                # user was AND what the wake word scored. Splitting these
+                # across lines would mean correlating by timestamp to
+                # answer "was that turn bad because of the mic or the
+                # models" — the question this line exists to settle.
                 logger.info(
-                    "turn timing: transcript %.2fs, first audio %.2fs after end of speech",
+                    "turn timing: transcript %.2fs, first audio %.2fs after end of speech, "
+                    "capture peak %.0f dBFS, peak wake score %.3f",
                     transcript_s,
                     now - self._end_of_speech_at,
+                    self._capture_peak_dbfs,
+                    self._peak_wake_score,
                 )
 
     # Fixed cushion past the estimated playback end: the estimate can't

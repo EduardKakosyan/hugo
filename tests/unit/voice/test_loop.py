@@ -4,8 +4,11 @@ cancellation entirely against fakes. No hardware, no real model inference,
 fully deterministic (timing windows are shrunk to tens of milliseconds)."""
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Callable
 
+import numpy as np
+import pytest
 from fakes import (
     SPEECH_END_MARKER,
     SPEECH_START_MARKER,
@@ -19,6 +22,7 @@ from fakes import (
 )
 
 from hugo.voice.chime import conversation_end_chime_pcm16, wake_chime_pcm16
+from hugo.voice.levels import SILENCE_DBFS
 from hugo.voice.loop import PROGRESS_NUDGE, SLEEP_CONFIRMATION, VoiceLoop, normalize_command
 
 
@@ -156,6 +160,68 @@ async def test_no_speech_after_wake_times_out_to_idle() -> None:
     assert stt.sent_audio == []  # nothing ever reached STT — no reset needed
     end_chime = conversation_end_chime_pcm16(robot.output_sample_rate_hz)
     assert robot.played_chunks[-1] == end_chime
+
+
+def _room_tone(amplitude: int = 4096) -> bytes:
+    """One mic frame's worth of steady, VAD-invisible level (~-18 dBFS)."""
+    return np.full(160, amplitude, dtype=np.int16).tobytes()
+
+
+async def test_a_window_that_hears_nothing_still_reports_how_loud_the_room_was(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The timeout line fires on exactly the failure being chased ("I spoke
+    # and nothing happened"), so it has to carry the level the mic saw —
+    # otherwise a quiet capture path and a VAD that just didn't trip are
+    # indistinguishable in the journal afterwards.
+    loop, robot, _tts, _stt, _thinker = _build_loop(no_speech_timeout_s=1.0)
+    task = asyncio.create_task(loop.run())
+    with caplog.at_level(logging.INFO, logger="hugo.voice.loop"):
+        try:
+            robot.push_frame(WAKE_MARKER)
+            await _wait_until(lambda: loop.state == "LISTENING")
+
+            # Keep feeding room tone until it registers: LISTENING's
+            # subscription is created just after the state flips, and the
+            # broadcaster only delivers to subscribers that already exist.
+            def push_until_metered() -> bool:
+                robot.push_frame(_room_tone())
+                return loop._capture_peak_dbfs > SILENCE_DBFS
+
+            await _wait_until(push_until_metered)
+            await _wait_until(lambda: loop.state == "IDLE")
+        finally:
+            await _run_cancelled(task)
+
+    timeouts = [m for m in (r.getMessage() for r in caplog.records) if "no speech within" in m]
+    assert timeouts, "the timeout path must log"
+    assert "capture peak" in timeouts[0]
+    assert "dBFS" in timeouts[0]
+
+
+async def test_turn_timing_line_carries_capture_level_and_wake_score(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # One greppable line per turn, not two: latency, level, and wake score
+    # together are what make a bad turn attributable to the mic or to the
+    # models without correlating timestamps.
+    loop, robot, _tts, _stt, _thinker = _build_loop()
+    task = asyncio.create_task(loop.run())
+    with caplog.at_level(logging.INFO, logger="hugo.voice.loop"):
+        try:
+            robot.push_frame(WAKE_MARKER)
+            await _wait_until(lambda: loop.state == "LISTENING")
+            robot.push_frame(SPEECH_START_MARKER)
+            robot.push_frame(_room_tone())
+            robot.push_frame(SPEECH_END_MARKER)
+            await _wait_until(lambda: any("turn timing:" in r.getMessage() for r in caplog.records))
+        finally:
+            await _run_cancelled(task)
+
+    [timing] = [m for m in (r.getMessage() for r in caplog.records) if "turn timing:" in m]
+    assert "capture peak" in timing
+    assert "peak wake score 1.000" in timing  # the score the wake word fired at
+    assert loop._capture_peak_dbfs > SILENCE_DBFS
 
 
 async def test_utterance_cap_forces_end_of_utterance() -> None:

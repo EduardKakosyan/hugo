@@ -26,17 +26,15 @@ the physical "load done" cue (VEN-57 as revised).
 import asyncio
 import contextlib
 import logging
-import math
 import subprocess
 import wave
 from pathlib import Path
-
-import numpy as np
 
 from hugo.config import Config, load_config
 from hugo.logging_setup import configure_logging
 from hugo.robot.audio_io import RobotAudioIO
 from hugo.voice.chime import wake_chime_pcm16
+from hugo.voice.levels import SILENCE_DBFS, peak_dbfs
 from hugo.voice.loop import WakeWordListener
 from hugo.voice.resample import StreamingPcm16Resampler
 
@@ -84,14 +82,6 @@ def _load_wake_ack_pcm(output_rate_hz: int) -> bytes | None:
     return StreamingPcm16Resampler(rate, output_rate_hz).process(pcm)
 
 
-def _peak_dbfs(frame: bytes, current_peak: float) -> float:
-    samples = np.frombuffer(frame, dtype=np.int16).astype(np.float32) / 32768.0
-    if not samples.size:
-        return current_peak
-    rms = float(np.sqrt(np.mean(samples * samples)))
-    return max(current_peak, 20.0 * math.log10(rms + 1e-9))
-
-
 async def listen_until_wake(
     robot: RobotAudioIO,
     wake_word: WakeWordListener,
@@ -103,11 +93,11 @@ async def listen_until_wake(
     wake_word.reset()
     frame_count = 0
     peak_score = 0.0
-    peak_level_dbfs = -120.0
+    peak_level_dbfs = SILENCE_DBFS
     async for frame in robot.read_mic_frames():
         fired = wake_word.feed(frame)
         peak_score = max(peak_score, wake_word.last_score)
-        peak_level_dbfs = _peak_dbfs(frame, peak_level_dbfs)
+        peak_level_dbfs = peak_dbfs(frame, peak_level_dbfs)
         frame_count += 1
         # Same telemetry the voice loop's IDLE state has: without it, "said
         # the wake word, nothing happened" is undiagnosable — no way to
@@ -123,7 +113,7 @@ async def listen_until_wake(
                 peak_level_dbfs,
             )
             peak_score = 0.0
-            peak_level_dbfs = -120.0
+            peak_level_dbfs = SILENCE_DBFS
         if fired:
             logger.info("wake word heard while asleep")
             await robot.play_audio(wake_chime_pcm16(robot.output_sample_rate_hz))
