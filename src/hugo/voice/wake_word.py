@@ -25,15 +25,27 @@ class WakeWordDetector:
         self, model_name: str = DEFAULT_MODEL, threshold: float = DEFAULT_THRESHOLD
     ) -> None:
         is_custom_model_file = model_name.endswith(".onnx")
-        if not is_custom_model_file:
-            # Model() doesn't auto-download its pretrained weights —
-            # confirmed by a fresh-clone failure on dgx1 (2026-07-13).
-            # Ensure they're present rather than requiring a separate
-            # manual step first. A custom model (a path to an .onnx, e.g.
-            # a trained hey_hugo) skips this: only the shared preprocessor
-            # models are needed and they're already on disk from the
-            # stock-model era.
-            openwakeword.utils.download_models([model_name])
+        # Model() doesn't auto-download its pretrained weights — confirmed
+        # by a fresh-clone failure on dgx1 (2026-07-13). Ensure they're
+        # present rather than requiring a separate manual step first.
+        #
+        # This runs for a CUSTOM model too. Every model, custom or stock,
+        # is preceded by the shared melspectrogram + embedding
+        # preprocessors, and download_models() fetches those (and the VAD
+        # models) unconditionally before it looks at the list. Skipping
+        # the call for custom models assumed the preprocessors were
+        # "already on disk from the stock-model era" — true only of a
+        # long-lived venv. A fresh one (any new branch worktree) had none,
+        # and the ONNX load failed with NO_SUCHFILE inside the
+        # orchestrator's startup try, whose finally group-SIGKILLs its own
+        # process group — so hugo died with no traceback at all, ~1s after
+        # "llm warmup complete" (dgx1, 2026-08-17).
+        #
+        # Passing the list unconditionally is safe: matching is a substring
+        # test against official model filenames, and a custom model is an
+        # absolute .onnx path that matches none of them, so no stock
+        # wake word is fetched. An EMPTY list would mean "download all".
+        openwakeword.utils.download_models([model_name])
         self._model = Model(wakeword_models=[model_name], inference_framework="onnx")
         # openWakeWord keys its score dict by the file stem for custom
         # model paths, and by the plain name for stock models.
